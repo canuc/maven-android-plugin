@@ -528,7 +528,6 @@ public class ManifestUpdateMojo extends AbstractAndroidMojo
             for ( int i = 0; i < metatDataElem.getLength(); ++ i )
             {
                  Node node = metatDataElem.item( i );
-                 getLog().info( "Testing if node " + node.getNodeName() + " is application" );
                  if (node.getNodeType() == Node.ELEMENT_NODE
                       && ELEM_META_DATA.equals(((Element) node).getTagName())) {
 					applicationElem.removeChild(node);
