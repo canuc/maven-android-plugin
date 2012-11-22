@@ -525,11 +525,13 @@ public class ManifestUpdateMojo extends AbstractAndroidMojo
             NodeList appApplication = manifestElement.getElementsByTagName( ELEM_APPLICATION );
             Element applicationElem = ( Element ) appApplication.item( 0 );
             NodeList metatDataElem = applicationElem.getChildNodes();
-            for ( int i = 0; i < metatDataElem.getLength(); ++ i )
+            for ( int i = 0; i < metatDataElem.getLength(); i++ )
             {
                  Node node = metatDataElem.item( i );
+                 
                  if (node.getNodeType() == Node.ELEMENT_NODE
-                      && ELEM_META_DATA.equals(((Element) node).getTagName())) {
+                      && ELEM_META_DATA.equalsIgnoreCase(((Element) node).getNodeName())) {
+                	getLog().info( "Removing" + node.getNodeName() + " from parent application node" );
 					applicationElem.removeChild(node);
 					dirty = true;
 				}
@@ -541,6 +543,7 @@ public class ManifestUpdateMojo extends AbstractAndroidMojo
                 elem.setAttribute( ATTR_META_DATA_NAME, ( String ) key );
                 elem.setAttribute( ATTR_META_DATA_VALUE, parsedManifestMetaData.getProperty( ( String ) key, "" ) );
                 applicationElem.appendChild(elem);
+                getLog().info( "Appending child " + ELEM_META_DATA + " to parent application node. " + ATTR_META_DATA_NAME + ":" + ( String ) key + " value: " +parsedManifestMetaData.getProperty( ( String ) key, "" )   );
                 dirty = true;
             }
         }
