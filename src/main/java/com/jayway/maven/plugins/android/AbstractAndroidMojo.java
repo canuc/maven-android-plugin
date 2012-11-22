@@ -16,13 +16,20 @@
  */
 package com.jayway.maven.plugins.android;
 
-import com.android.ddmlib.AndroidDebugBridge;
-import com.android.ddmlib.IDevice;
-import com.android.ddmlib.InstallException;
-import com.jayway.maven.plugins.android.common.AetherHelper;
-import com.jayway.maven.plugins.android.common.AndroidExtension;
-import com.jayway.maven.plugins.android.common.DeviceHelper;
-import com.jayway.maven.plugins.android.configuration.Sdk;
+import static com.jayway.maven.plugins.android.common.AndroidExtension.APK;
+import static org.apache.commons.lang.StringUtils.isBlank;
+
+import java.io.File;
+import java.net.MalformedURLException;
+import java.net.URL;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Scanner;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
+
 import org.apache.commons.jxpath.JXPathContext;
 import org.apache.commons.jxpath.JXPathNotFoundException;
 import org.apache.commons.jxpath.xml.DocumentContainer;
@@ -39,19 +46,13 @@ import org.sonatype.aether.RepositorySystem;
 import org.sonatype.aether.RepositorySystemSession;
 import org.sonatype.aether.repository.RemoteRepository;
 
-import java.io.File;
-import java.net.MalformedURLException;
-import java.net.URL;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.LinkedHashSet;
-import java.util.List;
-import java.util.Scanner;
-import java.util.Set;
-import java.util.concurrent.atomic.AtomicBoolean;
-
-import static com.jayway.maven.plugins.android.common.AndroidExtension.APK;
-import static org.apache.commons.lang.StringUtils.isBlank;
+import com.android.ddmlib.AndroidDebugBridge;
+import com.android.ddmlib.IDevice;
+import com.android.ddmlib.InstallException;
+import com.jayway.maven.plugins.android.common.AetherHelper;
+import com.jayway.maven.plugins.android.common.AndroidExtension;
+import com.jayway.maven.plugins.android.common.DeviceHelper;
+import com.jayway.maven.plugins.android.configuration.Sdk;
 
 /**
  * Contains common fields and methods for android mojos.

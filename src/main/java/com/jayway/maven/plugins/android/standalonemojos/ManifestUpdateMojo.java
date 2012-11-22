@@ -36,6 +36,8 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Properties;
+import java.util.Set;
 
 /**
  * Updates various version attributes present in the <code>AndroidManifest.xml</code> file.
@@ -69,8 +71,11 @@ public class ManifestUpdateMojo extends AbstractAndroidMojo
     private static final String ATTR_REQUIRES_SMALLEST_WIDTH_DP = "android:requiresSmallestWidthDp";
     private static final String ATTR_LARGEST_WIDTH_LIMIT_DP = "android:largestWidthLimitDp";
     private static final String ATTR_COMPATIBLE_WIDTH_LIMIT_DP = "android:compatibleWidthLimitDp";
-
+    private static final String ATTR_META_DATA_NAME = "android:name";
+    private static final String ATTR_META_DATA_VALUE = "android:value";
+    
     private static final String ELEM_APPLICATION = "application";
+    private static final String ELEM_META_DATA = "meta-data";
     private static final String ELEM_SUPPORTS_SCREENS = "supports-screens";
     private static final String ELEM_COMPATIBLE_SCREENS = "compatible-screens";
     private static final String ELEM_SCREEN = "screen";
@@ -209,6 +214,11 @@ public class ManifestUpdateMojo extends AbstractAndroidMojo
      */
     protected List<CompatibleScreen> manifestCompatibleScreens;
 
+    /**
+     * 
+     */
+    protected Properties manifestMetaData;
+    
     private String parsedVersionName;
     private Integer parsedVersionCode;
     private boolean parsedVersionCodeAutoIncrement;
@@ -217,7 +227,8 @@ public class ManifestUpdateMojo extends AbstractAndroidMojo
     private Boolean parsedDebuggable;
     private SupportsScreens parsedSupportsScreens;
     private List<CompatibleScreen> parsedCompatibleScreens;
-
+    private Properties parsedManifestMetaData;
+    
     /**
      *
      * @throws MojoExecutionException
@@ -246,7 +257,8 @@ public class ManifestUpdateMojo extends AbstractAndroidMojo
         getLog().debug( "    debuggable=" + parsedDebuggable );
         getLog().debug( "    supports-screens: " + ( parsedSupportsScreens == null ? "not set" : "set" ) );
         getLog().debug( "    compatible-screens: " + ( parsedCompatibleScreens == null ? "not set" : "set" ) );
-
+        getLog().debug( "    manifest meta-data: " + ( parsedManifestMetaData == null ? "not set" : "set" ) );
+        
         if ( ! androidManifestFile.exists() )
         {
             return; // skip, no AndroidManifest.xml file found.
@@ -343,6 +355,14 @@ public class ManifestUpdateMojo extends AbstractAndroidMojo
             {
                 parsedCompatibleScreens = manifestCompatibleScreens;
             }
+            if ( manifest.getMetaDataTags() != null )
+            {
+                parsedManifestMetaData = manifest.getMetaDataTags();
+            }
+            else
+            {
+                parsedManifestMetaData = manifestMetaData;
+            } 
         }
         else
         {
@@ -497,6 +517,32 @@ public class ManifestUpdateMojo extends AbstractAndroidMojo
                         dirty = true;
                     }
                 }
+            }
+        }
+        
+        if ( parsedManifestMetaData != null ) 
+        {
+            NodeList appApplication = manifestElement.getElementsByTagName( ELEM_APPLICATION );
+            Element applicationElem = ( Element ) appApplication.item( 0 );
+            NodeList metatDataElem = applicationElem.getChildNodes();
+            for ( int i = 0; i < metatDataElem.getLength(); ++ i )
+            {
+                 Node node = metatDataElem.item( i );
+                 getLog().info( "Testing if node " + node.getNodeName() + " is application" );
+                 if (node.getNodeType() == Node.ELEMENT_NODE
+                      && ELEM_META_DATA.equals(((Element) node).getTagName())) {
+					applicationElem.removeChild(node);
+					dirty = true;
+				}
+            }
+            Set<Object> addKeys = parsedManifestMetaData.keySet();
+            for ( Object key : addKeys ) 
+            {
+                Element elem = doc.createElement( ELEM_META_DATA );
+                elem.setAttribute( ATTR_META_DATA_NAME, ( String ) key );
+                elem.setAttribute( ATTR_META_DATA_VALUE, parsedManifestMetaData.getProperty( ( String ) key, "" ) );
+                applicationElem.appendChild(elem);
+                dirty = true;
             }
         }
 

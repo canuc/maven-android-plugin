@@ -1,9 +1,10 @@
 package com.jayway.maven.plugins.android.configuration;
 
+import java.util.List;
+import java.util.Properties;
+
 import com.jayway.maven.plugins.android.standalonemojos.CompatibleScreen;
 import com.jayway.maven.plugins.android.standalonemojos.SupportsScreens;
-
-import java.util.List;
 
 /**
  * Configuration for the manifest update. This class is only the definition of the parameters that are shadowed in
@@ -58,7 +59,9 @@ public class Manifest
      * .
      */
     protected List<CompatibleScreen> compatibleScreens;
-
+    
+    protected Properties metaDataTags;
+ 
     public String getVersionName()
     {
         return versionName;
@@ -97,5 +100,10 @@ public class Manifest
     public List<CompatibleScreen> getCompatibleScreens()
     {
         return compatibleScreens;
+    }
+    
+    public Properties getMetaDataTags()
+    {
+        return metaDataTags;
     }
 }
