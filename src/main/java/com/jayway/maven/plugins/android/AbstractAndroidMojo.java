@@ -16,6 +16,7 @@
  */
 package com.jayway.maven.plugins.android;
 
+
 import static com.jayway.maven.plugins.android.common.AndroidExtension.APK;
 import static org.apache.commons.lang.StringUtils.isBlank;
 
@@ -30,6 +31,16 @@ import java.util.Scanner;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+
+import com.android.ddmlib.AndroidDebugBridge;
+import com.android.ddmlib.IDevice;
+import com.android.ddmlib.InstallException;
+import com.jayway.maven.plugins.android.common.AetherHelper;
+import com.jayway.maven.plugins.android.common.AndroidExtension;
+import com.jayway.maven.plugins.android.common.DeviceHelper;
+import com.jayway.maven.plugins.android.config.ConfigPojo;
+import com.jayway.maven.plugins.android.configuration.Ndk;
+import com.jayway.maven.plugins.android.configuration.Sdk;
 import org.apache.commons.jxpath.JXPathContext;
 import org.apache.commons.jxpath.JXPathNotFoundException;
 import org.apache.commons.jxpath.xml.DocumentContainer;
@@ -71,7 +82,7 @@ public abstract class AbstractAndroidMojo extends AbstractMojo
     }
 
     /**
-     * Android Debug Bridge initialisation timeout in milliseconds.
+     * Android Debug Bridge initialization timeout in milliseconds.
      */
     private static final long ADB_TIMEOUT_MS = 60L * 1000;
 
@@ -79,6 +90,30 @@ public abstract class AbstractAndroidMojo extends AbstractMojo
      * The <code>ANDROID_NDK_HOME</code> environment variable name.
      */
     public static final String ENV_ANDROID_NDK_HOME = "ANDROID_NDK_HOME";
+    
+    /**
+     * <p>The Android NDK to use.</p>
+     * <p>Looks like this:</p>
+     * <pre>
+     * &lt;ndk&gt;
+     *     &lt;path&gt;/opt/android-ndk-r4&lt;/path&gt;
+     * &lt;/ndk&gt;
+     * </pre>
+     * <p>The <code>&lt;path&gt;</code> parameter is optional. The default is the setting of the ANDROID_NDK_HOME
+     * environment variable. The parameter can be used to override this setting with a different environment variable
+     * like this:</p>
+     * <pre>
+     * &lt;ndk&gt;
+     *     &lt;path&gt;${env.ANDROID_NDK_HOME}&lt;/path&gt;
+     * &lt;/ndk&gt;
+     * </pre>
+     * <p>or just with a hardcoded absolute path. The parameters can also be configured from command-line with parameter
+     * <code>-Dandroid.ndk.path</code>.</p>
+     *
+     * @parameter
+     */
+    @ConfigPojo( prefix = "ndk" )
+    private Ndk ndk;
 
     /**
      * The maven project.
@@ -123,7 +158,7 @@ public abstract class AbstractAndroidMojo extends AbstractMojo
 
 
     /**
-     * The android resources overlay directory. This will be overriden
+     * The android resources overlay directory. This will be overridden
      * by resourceOverlayDirectories if present.
      *
      * @parameter default-value="${project.basedir}/res-overlay"
@@ -242,6 +277,15 @@ public abstract class AbstractAndroidMojo extends AbstractMojo
     protected String[] aaptExtraArgs;
 
     /**
+     * Automatically create a ProGuard configuration file that will guard Activity classes and the like that are 
+     * defined in the AndroidManifest.xml. This files is then automatically used in the proguard mojo execution, 
+     * if enabled.
+     *
+     * @parameter expression="${android.proguardFile}"
+     */
+    protected File proguardFile;
+
+    /**
      * Decides whether the Apk should be generated or not. If set to false, dx and apkBuilder will not run. This is
      * probably most useful for a project used to generate apk sources to be inherited into another application
      * project.
@@ -301,8 +345,8 @@ public abstract class AbstractAndroidMojo extends AbstractMojo
      * <code>platforms/android-*</code> directories in the Android SDK directory. Default is the latest available
      * version, so you only need to set it if you for example want to use platform 1.5 but also have e.g. 2.2 installed.
      * Has no effect when used on an Android SDK 1.1. The parameter can also be coded as the API level. Therefore valid
-     * values are 1.1, 1.5, 1.6, 2.0, 2.01, 2.1, 2,2 as well as 3, 4, 5, 6, 7, 8. If a platform/api level is not
-     * installed on the machine an error message will be produced. </p>
+     * values are 1.1, 1.5, 1.6, 2.0, 2.01, 2.1, 2.2 and so as well as 3, 4, 5, 6, 7, 8... 16. If a platform/api level 
+     * is not installed on the machine an error message will be produced. </p>
      * <p>The <code>&lt;path&gt;</code> parameter is optional. The default is the setting of the ANDROID_HOME
      * environment variable. The parameter can be used to override this setting with a different environment variable
      * like this:</p>
@@ -311,7 +355,7 @@ public abstract class AbstractAndroidMojo extends AbstractMojo
      *     &lt;path&gt;${env.ANDROID_SDK}&lt;/path&gt;
      * &lt;/sdk&gt;
      * </pre>
-     * <p>or just with a hardcoded absolute path. The parameters can also be configured from command-line with
+     * <p>or just with a hard-coded absolute path. The parameters can also be configured from command-line with
      * parameters <code>-Dandroid.sdk.path</code> and <code>-Dandroid.sdk.platform</code>.</p>
      *
      * @parameter
@@ -401,8 +445,8 @@ public abstract class AbstractAndroidMojo extends AbstractMojo
     private File ndkPath;
 
     /**
-     * Whether to create a release build (default is false / debug build). This affect BuildConfig generation at this
-     * stage, but should probably affect other aspects of the build.
+     * Whether to create a release build (default is false / debug build). This affect BuildConfig generation 
+     * and apk generation at this stage, but should probably affect other aspects of the build.
      * @parameter expression="${android.release}" default-value="false"
      */
     protected boolean release;
@@ -604,21 +648,24 @@ public abstract class AbstractAndroidMojo extends AbstractMojo
         {
             public void doWithDevice( final IDevice device ) throws MojoExecutionException
             {
+                String deviceLogLinePrefix = DeviceHelper.getDeviceLogLinePrefix( device );
                 try
                 {
                     String result = device.installPackage( apkFile.getAbsolutePath(), true );
                     // according to the docs for installPackage, not null response is error
                     if ( result != null )
                     {
-                        throw new MojoExecutionException( "Install of " + apkFile.getAbsolutePath()
+                        throw new MojoExecutionException( deviceLogLinePrefix 
+                                + "Install of " + apkFile.getAbsolutePath()
                                 + " failed - [" + result + "]" );
                     }
-                    getLog().info( "Successfully installed " + apkFile.getAbsolutePath() + " to "
+                    getLog().info( deviceLogLinePrefix + "Successfully installed " + apkFile.getAbsolutePath() + " to "
                             + DeviceHelper.getDescriptiveName( device ) );
                 }
                 catch ( InstallException e )
                 {
-                    throw new MojoExecutionException( "Install of " + apkFile.getAbsolutePath() + " failed.", e );
+                    throw new MojoExecutionException( deviceLogLinePrefix + "Install of " + apkFile.getAbsolutePath() 
+                            + " failed.", e );
                 }
             }
         } );
@@ -673,7 +720,8 @@ public abstract class AbstractAndroidMojo extends AbstractMojo
 
 
     /**
-     * Determines which {@link IDevice}(s) to use, and performs the callback action on it/them.
+     * Performs the callback action on the devices determined by
+     * {@link #shouldDoWithThisDevice(com.android.ddmlib.IDevice)}
      *
      * @param deviceCallback the action to perform on each device
      * @throws org.apache.maven.plugin.MojoExecutionException
@@ -686,81 +734,126 @@ public abstract class AbstractAndroidMojo extends AbstractMojo
     {
         final AndroidDebugBridge androidDebugBridge = initAndroidDebugBridge();
 
-        if ( androidDebugBridge.isConnected() )
-        {
-            waitForInitialDeviceList( androidDebugBridge );
-            List<IDevice> devices = Arrays.asList( androidDebugBridge.getDevices() );
-            int numberOfDevices = devices.size();
-            getLog().info( "Found " + numberOfDevices + " devices connected with the Android Debug Bridge" );
-            if ( devices.size() > 0 )
-            {
-                if ( StringUtils.isNotBlank( device ) )
-                {
-                    getLog().info( "android.device parameter set to " + device );
-                    boolean deviceFound = false;
-                    for ( IDevice idevice : devices )
-                    {
-                        // use specified device or all emulators or all devices
-                        if ( "emulator".equals( device ) && idevice.isEmulator() )
-                        {
-                            getLog().info( "Emulator " + DeviceHelper.getDescriptiveName( idevice ) + " found." );
-                            deviceFound = true;
-                            deviceCallback.doWithDevice( idevice );
-                        }
-                        else
-                        {
-                            if ( "usb".equals( device ) && ! idevice.isEmulator() )
-                            {
-                                getLog().info( "Device " + DeviceHelper.getDescriptiveName( idevice ) + " found." );
-                                deviceFound = true;
-                                deviceCallback.doWithDevice( idevice );
-                            }
-                            else
-                            {
-                                if ( idevice.isEmulator() && ( device.equalsIgnoreCase( idevice.getAvdName() ) || device
-                                        .equalsIgnoreCase( idevice.getSerialNumber() ) ) )
-                                {
-                                    getLog().info(
-                                            "Emulator " + DeviceHelper.getDescriptiveName( idevice ) + " found." );
-                                    deviceFound = true;
-                                    deviceCallback.doWithDevice( idevice );
-                                }
-                                else
-                                {
-                                    if ( ! idevice.isEmulator() && device.equals( idevice.getSerialNumber() ) )
-                                    {
-                                        getLog().info(
-                                                "Device " + DeviceHelper.getDescriptiveName( idevice ) + " found." );
-                                        deviceFound = true;
-                                        deviceCallback.doWithDevice( idevice );
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    if ( ! deviceFound )
-                    {
-                        throw new MojoExecutionException( "No device found for android.device=" + device );
-                    }
-                }
-                else
-                {
-                    getLog().info( "android.device parameter not set, using all attached devices" );
-                    for ( IDevice idevice : devices )
-                    {
-                        deviceCallback.doWithDevice( idevice );
-                    }
-                }
-            }
-            else
-            {
-                throw new MojoExecutionException( "No online devices attached." );
-            }
-        }
-        else
+        if ( !androidDebugBridge.isConnected() )
         {
             throw new MojoExecutionException( "Android Debug Bridge is not connected." );
         }
+
+        waitForInitialDeviceList( androidDebugBridge );
+        List<IDevice> devices = Arrays.asList( androidDebugBridge.getDevices() );
+        int numberOfDevices = devices.size();
+        getLog().info( "Found " + numberOfDevices + " devices connected with the Android Debug Bridge" );
+        if ( devices.size() == 0 )
+        {
+            throw new MojoExecutionException( "No online devices attached." );
+        }
+
+        boolean shouldRunOnAllDevices = StringUtils.isBlank( device );
+        if ( shouldRunOnAllDevices )
+        {
+            getLog().info( "android.device parameter not set, using all attached devices" );
+        }
+        else
+        {
+            getLog().info( "android.device parameter set to " + device );
+        }
+
+        ArrayList<DoThread> doThreads = new ArrayList<DoThread>();
+        for ( final IDevice idevice : devices )
+        {
+            if ( shouldRunOnAllDevices )
+            {
+                String deviceType = idevice.isEmulator() ? "Emulator " : "Device ";
+                getLog().info( deviceType + DeviceHelper.getDescriptiveName( idevice ) + " found." );
+            }
+            if ( shouldRunOnAllDevices || shouldDoWithThisDevice( idevice ) )
+            {
+                DoThread deviceDoThread = new DoThread() {
+                    public void runDo() throws MojoFailureException, MojoExecutionException
+                    {
+                        deviceCallback.doWithDevice( idevice );
+                    }
+                };
+                doThreads.add( deviceDoThread );
+                deviceDoThread.start();
+            }
+        }
+
+        joinAllThreads( doThreads );
+        throwAnyDoThreadErrors( doThreads );
+
+        if ( ! shouldRunOnAllDevices && doThreads.isEmpty() )
+        {
+            throw new MojoExecutionException( "No device found for android.device=" + device );
+        }
+    }
+
+    private void joinAllThreads( ArrayList<DoThread> doThreads )
+    {
+        for ( Thread deviceDoThread : doThreads )
+        {
+            try
+            {
+                deviceDoThread.join();
+            }
+            catch ( InterruptedException e )
+            {
+                new MojoExecutionException( "Thread#join error for device: " + device );
+            }
+        }
+    }
+
+    private void throwAnyDoThreadErrors( ArrayList<DoThread> doThreads ) throws MojoExecutionException,
+            MojoFailureException
+    {
+        for ( DoThread deviceDoThread : doThreads )
+        {
+            if ( deviceDoThread.failure != null )
+            {
+                throw deviceDoThread.failure;
+            }
+            if ( deviceDoThread.execution != null )
+            {
+                throw deviceDoThread.execution;
+            }
+        }
+    }
+
+    /**
+     * Determines if this {@link IDevice}(s) should be used
+     *
+     * @param idevice the device to check
+     * @return if the device should be used
+     * @throws org.apache.maven.plugin.MojoExecutionException
+     *          in case there is a problem
+     * @throws org.apache.maven.plugin.MojoFailureException
+     *          in case there is a problem
+     */
+    private boolean shouldDoWithThisDevice( IDevice idevice ) throws MojoExecutionException, MojoFailureException
+    {
+        // use specified device or all emulators or all devices
+        if ( "emulator".equals( device ) && idevice.isEmulator() )
+        {
+            return true;
+        }
+
+        if ( "usb".equals( device ) && ! idevice.isEmulator() )
+        {
+            return true;
+        }
+
+        if ( idevice.isEmulator() && ( device.equalsIgnoreCase( idevice.getAvdName() ) || device
+                .equalsIgnoreCase( idevice.getSerialNumber() ) ) )
+        {
+            return true;
+        }
+
+        if ( ! idevice.isEmulator() && device.equals( idevice.getSerialNumber() ) )
+        {
+            return true;
+        }
+
+        return false;
     }
 
     /**
@@ -794,17 +887,19 @@ public abstract class AbstractAndroidMojo extends AbstractMojo
         {
             public void doWithDevice( final IDevice device ) throws MojoExecutionException
             {
+                String deviceLogLinePrefix = DeviceHelper.getDeviceLogLinePrefix( device );
                 try
                 {
                     device.uninstallPackage( packageName );
-                    getLog().info( "Successfully uninstalled " + packageName + " from "
+                    getLog().info( deviceLogLinePrefix + "Successfully uninstalled " + packageName + " from "
                             + DeviceHelper.getDescriptiveName( device ) );
                     result.set( true );
                 }
                 catch ( InstallException e )
                 {
                     result.set( false );
-                    throw new MojoExecutionException( "Uninstall of " + packageName + " failed.", e );
+                    throw new MojoExecutionException( deviceLogLinePrefix + "Uninstall of " + packageName 
+                            + " failed.", e );
                 }
             }
         } );
@@ -827,10 +922,10 @@ public abstract class AbstractAndroidMojo extends AbstractMojo
         commands.add( "xmltree" );
         commands.add( apkFile.getAbsolutePath() );
         commands.add( "AndroidManifest.xml" );
-        getLog().info( getAndroidSdk().getPathForTool( "aapt" ) + " " + commands.toString() );
+        getLog().info( getAndroidSdk().getAaptPath() + " " + commands.toString() );
         try
         {
-            executor.executeCommand( getAndroidSdk().getPathForTool( "aapt" ), commands, false );
+            executor.executeCommand( getAndroidSdk().getAaptPath(), commands, false );
             final String xmlTree = executor.getStandardOut();
             return extractPackageNameFromAndroidManifestXmlTree( xmlTree );
         }
@@ -990,8 +1085,8 @@ public abstract class AbstractAndroidMojo extends AbstractMojo
     /**
      * <p>Returns the Android SDK to use.</p>
      * <p/>
-     * <p>Current implementation looks for <code>&lt;sdk&gt;&lt;path&gt;</code> configuration in pom, then System
-     * property <code>android.sdk.path</code>, then environment variable <code>ANDROID_HOME</code>.
+     * <p>Current implementation looks for System property <code>android.sdk.path</code>, then
+     * <code>&lt;sdk&gt;&lt;path&gt;</code> configuration in pom, then environment variable <code>ANDROID_HOME</code>.
      * <p/>
      * <p>This is where we collect all logic for how to lookup where it is, and which one to choose. The lookup is
      * based on available parameters. This method should be the only one you should need to look at to understand how
@@ -1120,12 +1215,16 @@ public abstract class AbstractAndroidMojo extends AbstractMojo
      */
     protected AndroidNdk getAndroidNdk() throws MojoExecutionException
     {
-        File chosenNdkPath;
+        File chosenNdkPath = null;
         // There is no <ndk> tag in the pom.
         if ( ndkPath != null )
         {
             // -Dandroid.ndk.path is set on command line, or via <properties><ndk.path>...
             chosenNdkPath = ndkPath;
+        }
+        else if ( ndk != null && ndk.getPath() != null )
+        {
+            chosenNdkPath = ndk.getPath();
         }
         else
         {
@@ -1172,5 +1271,29 @@ public abstract class AbstractAndroidMojo extends AbstractMojo
         }
 
         return overlayDirectories;
+    }
+
+    private abstract class DoThread extends Thread
+    {
+        private MojoFailureException failure;
+        private MojoExecutionException execution;
+
+        public final void run()
+        {
+            try
+            {
+                runDo();
+            }
+            catch ( MojoFailureException e )
+            {
+                failure = e;
+            }
+            catch ( MojoExecutionException e )
+            {
+                execution = e;
+            }
+        }
+
+        protected abstract void runDo() throws MojoFailureException, MojoExecutionException;
     }
 }

@@ -17,9 +17,17 @@
 -->
 <project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd">
     <modelVersion>4.0.0</modelVersion>
+    <!-- the progressive-company-super-pom manages all plugin versions for us, we only need to override 
+    where we depend on lower version (e.g. plugin-plugin) -->
+    <parent>
+        <groupId>com.simpligility.maven</groupId>
+        <artifactId>progressive-company-super-pom</artifactId>
+        <version>0.6.0</version>
+    </parent>
     <groupId>com.jayway.maven.plugins.android.generation2</groupId>
     <artifactId>android-maven-plugin</artifactId>
-    <version>3.4.5-KIK</version>
+    <version>3.6.1-KIK</version>
+
     <packaging>maven-plugin</packaging>
     <name>Android Maven Plugin - android-maven-plugin</name>
     <description>Maven Plugin for Android Development</description>
@@ -28,7 +36,6 @@
     <properties>
         <scm.branch>master</scm.branch>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-
         <!-- Don't upgrade maven-plugin-plugin until MPLUGIN-187 is fixed:
         http://jira.codehaus.org/browse/MPLUGIN-187 -->
         <!-- 3.1 is available but causes build failure like
@@ -44,6 +51,9 @@
         <maven-plugin-plugin.version>2.8</maven-plugin-plugin.version>
 
         <maven.api.version>3.0.3</maven.api.version>
+        <easymock.version>3.1</easymock.version>
+        <powermock.version>1.5</powermock.version>
+        <aether.version>1.13.1</aether.version>
     </properties>
     <scm>
         <url>http://github.com/jayway/maven-android-plugin/tree/${scm.branch}</url>
@@ -57,7 +67,7 @@
     </issueManagement>
     <ciManagement>
         <system>Jenkins</system>
-        <url>http://hudson.josefson.org/view/Android%20Maven%20Plugin/</url>
+        <url>http://jenkins.josefson.org/job/maven-android-plugin-master/</url>
     </ciManagement>
     <licenses>
         <license>
@@ -85,11 +95,22 @@
     <prerequisites>
         <maven>[3.0.3,)</maven>
     </prerequisites>
+    <dependencyManagement>
+        <dependencies>
+            <!-- managing archiver explicitly to 2.3 since 2.2 as found in maven-archiver causes issues
+            with excessive logging -->
+            <dependency>
+                <groupId>org.codehaus.plexus</groupId>
+                <artifactId>plexus-archiver</artifactId>
+                <version>2.3</version>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
     <dependencies>
         <dependency>
             <groupId>junit</groupId>
             <artifactId>junit</artifactId>
-            <version>4.9</version>
+            <version>4.11</version>
             <scope>test</scope>
         </dependency>
         <dependency>
@@ -99,9 +120,9 @@
             <scope>test</scope>
         </dependency>
         <dependency>
-            <groupId>com.android.ddmlib</groupId>
-            <artifactId>ddmlib</artifactId>
-            <version>r16</version>
+            <groupId>com.android.tools.build</groupId>
+            <artifactId>builder</artifactId>
+            <version>0.4.1</version>
         </dependency>
         <dependency>
             <groupId>org.apache.maven</groupId>
@@ -120,13 +141,18 @@
         </dependency>
         <dependency>
             <groupId>org.apache.maven</groupId>
+            <artifactId>maven-compat</artifactId>
+            <version>${maven.api.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.maven</groupId>
             <artifactId>maven-core</artifactId>
             <version>${maven.api.version}</version>
         </dependency>
         <dependency>
             <groupId>org.apache.maven</groupId>
             <artifactId>maven-archiver</artifactId>
-            <version>2.4.2</version>
+            <version>2.5</version>
         </dependency>
         <dependency>
             <groupId>emma</groupId>
@@ -136,19 +162,17 @@
         <dependency>
           <groupId>org.codehaus.plexus</groupId>
           <artifactId>plexus-archiver</artifactId>
-          <version>2.0.1</version>
         </dependency>
-
         <dependency>
           <artifactId>plexus-utils</artifactId>
           <groupId>org.codehaus.plexus</groupId>
-          <version>3.0</version>
+          <version>3.0.10</version>
         </dependency>
 
         <dependency>
             <groupId>org.apache.maven.plugin-testing</groupId>
             <artifactId>maven-plugin-testing-harness</artifactId>
-            <version>2.0-alpha-1</version>
+            <version>2.1</version>
             <scope>test</scope>
         </dependency>
         <dependency>
@@ -159,17 +183,12 @@
         <dependency>
             <groupId>commons-io</groupId>
             <artifactId>commons-io</artifactId>
-            <version>2.0.1</version>
-        </dependency>
-        <dependency>
-             <groupId>org.apache.maven.reporting</groupId>
-             <artifactId>maven-reporting-impl</artifactId>
-             <version>2.0</version>
+            <version>2.4</version>
         </dependency>
         <dependency>
             <groupId>org.ow2.asm</groupId>
             <artifactId>asm</artifactId>
-            <version>4.0</version>
+            <version>4.1</version>
         </dependency>
         <dependency>
             <groupId>commons-lang</groupId>
@@ -180,28 +199,38 @@
         <dependency>
             <groupId>org.easymock</groupId>
             <artifactId>easymock</artifactId>
-            <version>3.0</version>
-            <scope>test</scope>
-        </dependency>
-
-        <dependency>
-            <groupId>org.easymock</groupId>
-            <artifactId>easymockclassextension</artifactId>
-            <version>3.0</version>
+            <version>${easymock.version}</version>
             <scope>test</scope>
         </dependency>
 
         <dependency>
             <groupId>org.powermock</groupId>
             <artifactId>powermock-module-junit4</artifactId>
-            <version>1.4.10</version>
+            <version>${powermock.version}</version>
             <scope>test</scope>
         </dependency>
-        
         <dependency>
             <groupId>org.powermock</groupId>
             <artifactId>powermock-api-easymock</artifactId>
-            <version>1.4.10</version>
+            <version>${powermock.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.powermock</groupId>
+            <artifactId>powermock-api-support</artifactId>
+            <version>${powermock.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.powermock</groupId>
+            <artifactId>powermock-reflect</artifactId>
+            <version>${powermock.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.powermock</groupId>
+            <artifactId>powermock-core</artifactId>
+            <version>${powermock.version}</version>
             <scope>test</scope>
         </dependency>
         
@@ -209,19 +238,24 @@
             <!-- required in all cases -->
             <groupId>org.sonatype.aether</groupId>
             <artifactId>aether-api</artifactId>
-            <version>1.12</version>
+            <version>${aether.version}</version>
         </dependency>
 
         <dependency>
             <!-- might be superfluous depending on your use case -->
             <groupId>org.sonatype.aether</groupId>
             <artifactId>aether-util</artifactId>
-            <version>1.12</version>
+            <version>${aether.version}</version>
         </dependency>
 
         <dependency>
             <groupId>com.github.rtyley</groupId>
             <artifactId>android-screenshot-paparazzo</artifactId>
+            <version>1.9</version>
+        </dependency>
+        <dependency>
+            <groupId>com.github.rtyley</groupId>
+            <artifactId>android-screenshot-celebrity</artifactId>
             <version>1.8</version>
         </dependency>
     </dependencies>
@@ -230,7 +264,6 @@
             <plugins>
                 <plugin>
                     <artifactId>maven-checkstyle-plugin</artifactId>
-                    <version>2.9.1</version>
                     <configuration>
                         <!-- we are using the Maven code style from the Maven Checkstyle Plugin
                             but with header check disabled, using the license plugin for that instead -->
@@ -239,60 +272,8 @@
                     </configuration>
                 </plugin>
                 <plugin>
-                    <artifactId>maven-compiler-plugin</artifactId>
-                    <version>2.5.1</version>
-                </plugin>
-                <plugin>
-                    <artifactId>maven-deploy-plugin</artifactId>
-                    <version>2.7</version>
-                </plugin>
-                <plugin>
-                    <artifactId>maven-gpg-plugin</artifactId>
-                    <version>1.4</version>
-                </plugin>
-                <plugin>
-                    <artifactId>maven-jar-plugin</artifactId>
-                    <version>2.4</version>
-                </plugin>
-                <plugin>
-                    <artifactId>maven-javadoc-plugin</artifactId>
-                    <version>2.8</version>
-                </plugin>
-                <plugin>
                     <artifactId>maven-plugin-plugin</artifactId>
                     <version>${maven-plugin-plugin.version}</version>
-                </plugin>
-                <plugin>
-                    <artifactId>maven-release-plugin</artifactId>
-                    <version>2.3.2</version>
-                </plugin>
-                <plugin>
-                    <artifactId>maven-scm-plugin</artifactId>
-                    <version>1.7</version>
-                </plugin>
-                <plugin>
-                    <artifactId>maven-source-plugin</artifactId>
-                    <version>2.2</version>
-                </plugin>
-                <plugin>
-                    <artifactId>maven-clean-plugin</artifactId>
-                    <version>2.5</version>
-                </plugin>
-                <plugin>
-                    <artifactId>maven-install-plugin</artifactId>
-                    <version>2.3.1</version>
-                </plugin>
-                <plugin>
-                    <artifactId>maven-resources-plugin</artifactId>
-                    <version>2.6</version>
-                </plugin>
-                <plugin>
-                    <artifactId>maven-site-plugin</artifactId>
-                    <version>3.0</version>
-                </plugin>
-                <plugin>
-                    <artifactId>maven-surefire-plugin</artifactId>
-                    <version>2.12.3</version>
                 </plugin>
             </plugins>
         </pluginManagement>
@@ -342,6 +323,91 @@
                     </execution>
                 </executions>
             </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-site-plugin</artifactId>
+                <configuration>
+                    <reportPlugins>
+                        <plugin>
+                            <artifactId>maven-plugin-plugin</artifactId>
+                            <version>${maven-plugin-plugin.version}</version>
+                        </plugin>
+                        <plugin>
+                            <groupId>org.apache.maven.plugins</groupId>
+                            <artifactId>maven-jxr-plugin</artifactId>
+                        </plugin>
+                        <plugin>
+                            <groupId>org.apache.maven.plugins</groupId>
+                            <artifactId>maven-checkstyle-plugin</artifactId>
+                        </plugin>
+                        <plugin>
+                            <groupId>org.apache.maven.plugins</groupId>
+                            <artifactId>maven-pmd-plugin</artifactId>
+                            <configuration>
+                                <linkXRef>true</linkXRef>
+                                <sourceEncoding>${project.build.sourceEncoding}</sourceEncoding>
+                                <minimumTokens>100</minimumTokens>
+                                <targetJdk>1.6</targetJdk>
+                            </configuration>
+                        </plugin>
+                        <plugin>
+                            <groupId>org.apache.maven.plugins</groupId>
+                            <artifactId>maven-project-info-reports-plugin</artifactId>
+                            <configuration>
+                                <dependencyDetailsEnabled>false</dependencyDetailsEnabled>
+                                <dependencyLocationsEnabled>false</dependencyLocationsEnabled>
+                            </configuration>
+                        </plugin>
+                        <plugin>
+                            <groupId>org.apache.maven.plugins</groupId>
+                            <artifactId>maven-javadoc-plugin</artifactId>
+                            <configuration>
+                                <quiet>true</quiet>
+                            </configuration>
+                        </plugin>
+                        <plugin>
+                            <groupId>org.apache.maven.plugins</groupId>
+                            <artifactId>maven-surefire-report-plugin</artifactId>
+                        </plugin>
+                        <plugin>
+                            <groupId>org.codehaus.mojo</groupId>
+                            <artifactId>cobertura-maven-plugin</artifactId>
+                            <configuration>
+                                <formats>
+                                    <format>xml</format>
+                                    <format>html</format>
+                                </formats>
+                            </configuration>
+                        </plugin>
+                        <plugin>
+                            <groupId>org.codehaus.mojo</groupId>
+                            <artifactId>findbugs-maven-plugin</artifactId>
+                            <configuration>
+                                <excludeFilterFile>src/conf/findbugs-exclude.xml</excludeFilterFile>
+                                <xmlOutput>true</xmlOutput>
+                                <threshold>Low</threshold>
+                                <effort>Max</effort>
+                                <debug>false</debug>
+                                <relaxed>false</relaxed>
+                            </configuration>
+                        </plugin>
+                    </reportPlugins>
+                </configuration>
+            </plugin>
+
+<!--
+            <plugin>
+                <groupId>org.sonatype.plugins</groupId>
+                <artifactId>nexus-staging-maven-plugin</artifactId>
+                <extensions>true</extensions>
+                <inherited>false</inherited>
+                <configuration>
+                    <serverId>oss.sonatype.org-jayway-staging</serverId>
+                    <nexusUrl>https://oss.sonatype.org/</nexusUrl>
+                    <stagingProfileId>26a4c760b261ca</stagingProfileId>
+                </configuration>
+            </plugin>
+-->
         </plugins>
     </build>
 
@@ -516,5 +582,4 @@
             </build>
         </profile>
     </profiles>
-
 </project>

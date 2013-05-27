@@ -18,6 +18,9 @@ import org.apache.commons.lang.SystemUtils;
 import org.apache.maven.plugin.MojoExecutionException;
 
 import java.io.File;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
 
 /**
  * Represents an Android NDK.
@@ -32,20 +35,30 @@ public class AndroidNdk
             + "alternative, you may add the parameter to commandline: -Dandroid.ndk.path=... or set environment "
             + "variable " + NdkBuildMojo.ENV_ANDROID_NDK_HOME + ".";
 
+    public static final String[] NDK_ARCHITECTURES = { "armeabi", "armeabi-v7a", "mips", "x86" };
+
     /**
      * Arm toolchain implementations.
      */
-    private static final String[] ARM_TOOLCHAIN = { "arm-linux-androideabi-4.4.3" };
+    private static final String[] ARM_TOOLCHAIN = {  "arm-linux-androideabi-4.7", "arm-linux-androideabi-4.6",
+                                                     "arm-linux-androideabi-4.4.3" };
 
     /**
      * x86 toolchain implementations.
      */
-    private static final String[] X86_TOOLCHAIN = { "x86-4.4.3" };
+    private static final String[] X86_TOOLCHAIN = { "x86-4.7", "x86-4.6", "x86-4.4.3" };
 
     /**
      * Mips toolchain implementations.
      */
-    private static final String[] MIPS_TOOLCHAIN = { "mipsel-linux-android-4.4.3" };
+    private static final String[] MIPS_TOOLCHAIN = { "mipsel-linux-android-4.7", "mipsel-linux-android-4.6",
+                                                     "mipsel-linux-android-4.4.3" };
+
+    /**
+     * Possible locations for the gdbserver file.
+     */
+    private static final String[] GDB_SERVER_LOCATIONS = { "toolchains/%s/prebuilt/gdbserver",
+                                                           "prebuilt/%s/gdbserver/gdbserver" };
 
     private final File ndkPath;
 
@@ -70,21 +83,49 @@ public class AndroidNdk
 
     private File findStripper( String toolchain )
     {
-        final File stripper;
+        List<String> osDirectories = new ArrayList<String>();
+        String extension = "";
+
         if ( SystemUtils.IS_OS_LINUX )
         {
-            return new File( ndkPath,
-                             "toolchains/" + toolchain + "/prebuilt/linux-x86/bin/arm-linux-androideabi-strip" );
+            osDirectories.add( "linux-x86" );
+            osDirectories.add( "linux-x86_64" );
         }
         else if ( SystemUtils.IS_OS_WINDOWS )
         {
-            return new File( ndkPath,
-                             "toolchains/" + toolchain + "/prebuilt/windows/bin/arm-linux-androideabi-strip.exe" );
+            osDirectories.add( "windows" );
+            osDirectories.add( "windows-x86_64" );
+            extension = ".exe";
         }
         else if ( SystemUtils.IS_OS_MAC || SystemUtils.IS_OS_MAC_OSX )
         {
-            return new File( ndkPath,
-                             "toolchains/" + toolchain + "/prebuilt/darwin-x86/bin/arm-linux-androideabi-strip" );
+            osDirectories.add( "darwin-x86" );
+            osDirectories.add( "darwin-x86_64" );
+        }
+
+        String fileName = "";
+        if ( toolchain.startsWith( "arm" ) )
+        {
+            fileName = "arm-linux-androideabi-strip" + extension;
+        }
+        else if ( toolchain.startsWith( "x86" ) )
+        {
+            fileName = "i686-linux-android-strip" + extension;
+        }
+        else if ( toolchain.startsWith( "mips" ) )
+        {
+            fileName = "mipsel-linux-android-strip" + extension;
+        }
+
+        for ( String osDirectory : osDirectories )
+        {
+            String stripperLocation =
+                String.format( "toolchains/%s/prebuilt/%s/bin/%s", toolchain, osDirectory, fileName );
+            final File stripper = new File( ndkPath, stripperLocation );
+            if ( stripper.exists() )
+            {
+                return stripper;
+            }
         }
         return null;
     }
@@ -134,15 +175,15 @@ public class AndroidNdk
 
         // try to resolve the toolchain now
         String ndkArchitecture = file.getParentFile().getName();
-        if ( "armeabi".equals( ndkArchitecture ) || "armeabi-v7a".equals( ndkArchitecture ) )
+        if ( ndkArchitecture.startsWith( "arm" ) )
         {
             resolvedNdkToolchain = resolveNdkToolchain( ARM_TOOLCHAIN );
         }
-        else if ( "x86".equals( ndkArchitecture ) )
+        else if ( ndkArchitecture.startsWith( "x86" ) )
         {
             resolvedNdkToolchain = resolveNdkToolchain( X86_TOOLCHAIN );
         }
-        else if ( "mips".equals( ndkArchitecture ) )
+        else if ( ndkArchitecture.startsWith( "mips" ) )
         {
             resolvedNdkToolchain = resolveNdkToolchain( MIPS_TOOLCHAIN );
         }
@@ -173,21 +214,41 @@ public class AndroidNdk
         }
     }
 
-
-    public File getGdbServer( String toolchain ) throws MojoExecutionException
+    public File getGdbServer( String ndkArchitecture ) throws MojoExecutionException
     {
-        final File gdbServerFile;
-
-        gdbServerFile = new File( ndkPath, "toolchains/" + toolchain + "/prebuilt/gdbserver" );
-
-        // Some basic validation
-        if ( ! gdbServerFile.exists() )
+        // create a list of possible gdb server parent folder locations
+        List<String> gdbServerLocations = new ArrayList<String>();
+        if ( ndkArchitecture.startsWith( "arm" ) )
         {
-            throw new MojoExecutionException( "gdbserver binary " + gdbServerFile.getAbsolutePath()
-                    + " does not exist, please double check the toolchain and OS used" );
+            gdbServerLocations.add( "android-arm" );
+            gdbServerLocations.addAll( Arrays.asList( ARM_TOOLCHAIN ) );
+        }
+        else if ( ndkArchitecture.startsWith( "x86" ) )
+        {
+            gdbServerLocations.add( "android-x86" );
+            gdbServerLocations.addAll( Arrays.asList( X86_TOOLCHAIN ) );
+        }
+        else if ( ndkArchitecture.startsWith( "mips" ) )
+        {
+            gdbServerLocations.add( "android-mips" );
+            gdbServerLocations.addAll( Arrays.asList( MIPS_TOOLCHAIN ) );
         }
 
-        // We should be good to go
-        return gdbServerFile;
+        // check for the gdb server
+        for ( String location : GDB_SERVER_LOCATIONS )
+        {
+            for ( String gdbServerLocation : gdbServerLocations )
+            {
+                File gdbServerFile = new File( ndkPath, String.format( location, gdbServerLocation ) );
+                if ( gdbServerFile.exists() )
+                {
+                    return gdbServerFile;
+                }
+            }
+        }
+
+        //  if we got here, throw an error
+        throw new MojoExecutionException( "gdbserver binary for architecture " + ndkArchitecture
+            + " does not exist, please double check the toolchain and OS used" );
     }
 }

@@ -3,7 +3,6 @@ package com.jayway.maven.plugins.android.phase04processclasses;
 import com.jayway.maven.plugins.android.AbstractAndroidMojo;
 import com.jayway.maven.plugins.android.CommandExecutor;
 import com.jayway.maven.plugins.android.ExecutionException;
-import com.jayway.maven.plugins.android.common.AndroidExtension;
 import com.jayway.maven.plugins.android.config.ConfigHandler;
 import com.jayway.maven.plugins.android.config.ConfigPojo;
 import com.jayway.maven.plugins.android.config.PullParameter;
@@ -13,7 +12,6 @@ import org.apache.maven.RepositoryUtils;
 import org.apache.maven.artifact.Artifact;
 import org.apache.maven.plugin.MojoExecutionException;
 import org.apache.maven.plugin.MojoFailureException;
-import org.codehaus.plexus.util.FileUtils;
 import org.sonatype.aether.util.artifact.DefaultArtifact;
 import org.sonatype.aether.util.artifact.JavaScopes;
 
@@ -51,6 +49,9 @@ public class ProguardMojo extends AbstractAndroidMojo
      * &lt;proguard&gt;
      *    &lt;skip&gt;true|false&lt;/skip&gt;
      *    &lt;config&gt;proguard.cfg&lt;/config&gt;
+     *    &lt;configs&gt;
+     *      &lt;config&gt;${env.ANDROID_HOME}/tools/proguard/proguard-android.txt&lt;/config&gt;
+     *    &lt;/configs&gt;
      *    &lt;proguardJarPath&gt;someAbsolutePathToProguardJar&lt;/proguardJarPath&gt;
      *    &lt;filterMavenDescriptor&gt;true|false&lt;/filterMavenDescriptor&gt;
      *    &lt;filterManifest&gt;true|false&lt;/filterManifest&gt;
@@ -94,6 +95,17 @@ public class ProguardMojo extends AbstractAndroidMojo
 
     @PullParameter( defaultValue = "proguard.cfg" )
     private String parsedConfig;
+
+    /**
+     * Additional ProGuard configuration files (relative to project root).
+     *
+     * @parameter expression="${android.proguard.configs}"
+     * @optional
+     */
+    private String[] proguardConfigs;
+
+    @PullParameter( defaultValueGetterMethod = "getDefaultProguardConfigs" )
+    private String[] parsedConfigs;
 
     /**
      * Path to the proguard jar and therefore version of proguard to be used. By default this will load the jar from
@@ -216,6 +228,11 @@ public class ProguardMojo extends AbstractAndroidMojo
     private static final Collection<String> MAVEN_DESCRIPTOR = Arrays.asList( "META-INF/maven/**" );
     private static final Collection<String> META_INF_MANIFEST = Arrays.asList( "META-INF/MANIFEST.MF" );
 
+    /**
+     * For Proguard is required only jar type dependencies, all other like .so or .apklib can be skipped.
+     */
+    private static final String USED_DEPENDENCY_TYPE = "jar";
+
     private Collection<String> globalInJarExcludes = new HashSet<String>();
 
     private List<Artifact> artifactBlacklist = new LinkedList<Artifact>();
@@ -223,6 +240,10 @@ public class ProguardMojo extends AbstractAndroidMojo
 
     private List<ProGuardInput> inJars = new LinkedList<ProguardMojo.ProGuardInput>();
     private List<ProGuardInput> libraryJars = new LinkedList<ProguardMojo.ProGuardInput>();
+
+    private File javaHomeDir;
+    private File javaLibDir;
+    private File altJavaLibDir;
 
     private static class ProGuardInput
     {
@@ -300,6 +321,16 @@ public class ProguardMojo extends AbstractAndroidMojo
 
         commands.add( "@" + parsedConfig );
 
+        for ( String config : parsedConfigs )
+        {
+            commands.add( "@" + config );
+        }
+
+        if ( proguardFile != null )
+        {
+            commands.add( "@" + proguardFile.getAbsolutePath() );
+        }
+
         collectInputFiles( commands );
 
         commands.add( "-outjars" );
@@ -359,12 +390,8 @@ public class ProguardMojo extends AbstractAndroidMojo
         collectProgramInputFiles();
         for ( ProGuardInput injar : inJars )
         {
-            // don't add android packaging files, these are not input to proguard
-            if ( ! AndroidExtension.isAndroidPackaging( FileUtils.extension( injar.path ) ) )
-            {
-                commands.add( "-injars" );
-                commands.add( injar.toCommandLine() );
-            }
+            commands.add( "-injars" );
+            commands.add( injar.toCommandLine() );
         }
 
         collectLibraryInputFiles();
@@ -440,7 +467,7 @@ public class ProguardMojo extends AbstractAndroidMojo
         // we then add all its dependencies (incl. transitive ones), unless they're blacklisted
         for ( Artifact artifact : getAllRelevantDependencyArtifacts() )
         {
-            if ( isBlacklistedArtifact( artifact ) )
+            if ( isBlacklistedArtifact( artifact ) || !USED_DEPENDENCY_TYPE.equals( artifact.getType() ) )
             {
                 continue;
             }
@@ -472,27 +499,32 @@ public class ProguardMojo extends AbstractAndroidMojo
     {
         if ( parsedIncludeJdkLibs )
         {
-            final String slash = File.separator;
             // we have to add the Java framework classes to the library JARs, since they are not
             // distributed with the JAR on Central, and since we'll strip them out of the android.jar
             // that is shipped with the SDK (since that is not a complete Java distribution)
-            String javaHome = System.getProperty( "java.home" );
-            String jdkLibsPath = null;
-            if ( javaHome.startsWith( "/System/Library/Java" ) || javaHome.startsWith( "/Library/Java" ) )
+            File rtJar = getJVMLibrary( "rt.jar" );
+            if ( rtJar == null )
             {
-                // MacOS X uses different naming conventions for JDK installations
-                jdkLibsPath = javaHome + "/../Classes";
-                addLibraryJar( jdkLibsPath + "/classes.jar" );
+                rtJar = getJVMLibrary( "classes.jar" );
             }
-            else
+            if ( rtJar != null )
             {
-                jdkLibsPath = javaHome + slash + "lib";
-                addLibraryJar( jdkLibsPath + slash + "rt.jar" );
+                addLibraryJar( rtJar.getPath() );
             }
+
             // we also need to add the JAR containing e.g. javax.servlet
-            addLibraryJar( jdkLibsPath + slash + "jsse.jar" );
+            File jsseJar = getJVMLibrary( "jsse.jar" );
+            if ( jsseJar != null )
+            {
+                addLibraryJar( jsseJar.getPath() );
+            }
+
             // and the javax.crypto stuff
-            addLibraryJar( jdkLibsPath + slash + "jce.jar" );
+            File jceJar = getJVMLibrary( "jce.jar" );
+            if ( jceJar != null )
+            {
+                addLibraryJar( jceJar.getPath() );
+            }
         }
 
         // we treat any dependencies with provided scope as library JARs
@@ -532,7 +564,8 @@ public class ProguardMojo extends AbstractAndroidMojo
         String proguardJarPath = getProguardJarPathFromDependencies();
         if ( StringUtils.isEmpty( proguardJarPath ) )
         {
-            proguardJarPath = getAndroidSdk().getPathForTool( "proguard/lib/proguard.jar" );
+            File proguardJarPathFile = new File( getAndroidSdk().getToolsPath(), "proguard/lib/proguard.jar" );
+            return proguardJarPathFile.getAbsolutePath();
         }
         return proguardJarPath;
     }
@@ -587,4 +620,73 @@ public class ProguardMojo extends AbstractAndroidMojo
         return new String[]{ "-Xmx512M" };
     }
 
+    /**
+     * Get the default ProGuard config files.
+     *
+     * @return
+     * @see #parsedConfigs
+     */
+    private String[] getDefaultProguardConfigs()
+    {
+        return new String[0];
+    }
+
+    /**
+     * Finds a library file in either the primary or alternate lib directory.
+     * @param fileName The base name of the file.
+     * @return Either a canonical filename, or {@code null} if not found.
+     */
+    private File getJVMLibrary( String fileName )
+    {
+        File libFile = new File( getJavaLibDir(), fileName );
+        if ( !libFile.exists() )
+        {
+            libFile = new File( getAltJavaLibDir(), fileName );
+            if ( !libFile.exists() )
+            {
+                libFile = null;
+            }
+        }
+        return libFile;
+    }
+
+    /**
+     * Determines the java.home directory.
+     * @return The java.home directory, as a File.
+     */
+    private File getJavaHomeDir()
+    {
+        if ( javaHomeDir == null )
+        {
+            javaHomeDir = new File( System.getProperty( "java.home" ) );
+        }
+        return javaHomeDir;
+    }
+
+    /**
+     * Determines the primary JVM library location.
+     * @return The primary library directory, as a File.
+     */
+    private File getJavaLibDir()
+    {
+        if ( javaLibDir == null )
+        {
+            javaLibDir = new File( getJavaHomeDir(), "lib" );
+        }
+        return javaLibDir;
+    }
+
+    /**
+     * Determines the alternate JVM library location (applies with older
+     * MacOSX JVMs).
+     * @return The alternate JVM library location, as a File.
+     */
+    private File getAltJavaLibDir()
+    {
+        if ( altJavaLibDir == null )
+        {
+            altJavaLibDir = new File( getJavaHomeDir().getParent(), "Classes" );
+        }
+        return altJavaLibDir;
+    }
 }

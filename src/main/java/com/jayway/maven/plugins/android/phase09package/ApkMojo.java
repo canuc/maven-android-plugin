@@ -17,6 +17,7 @@
 package com.jayway.maven.plugins.android.phase09package;
 
 import com.jayway.maven.plugins.android.AbstractAndroidMojo;
+import com.jayway.maven.plugins.android.AndroidNdk;
 import com.jayway.maven.plugins.android.AndroidSigner;
 import com.jayway.maven.plugins.android.CommandExecutor;
 import com.jayway.maven.plugins.android.ExecutionException;
@@ -55,6 +56,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
@@ -138,42 +140,11 @@ public class ApkMojo extends AbstractAndroidMojo
     private File nativeLibrariesOutputDirectory;
 
     /**
-     * <p>Default hardware architecture for native library dependencies (with {@code &lt;type>so&lt;/type>}).</p>
-     * <p>This value is used for dependencies without classifier, if
-     * {@code nativeLibrariesDependenciesHardwareArchitectureOverride} is not set.</p>
-     * <p>Valid values currently include {@code armeabi} and {@code armeabi-v7a}.</p>
-     *
-     * @parameter expression="${android.nativeLibrariesDependenciesHardwareArchitectureDefault}" default-value="armeabi"
-     */
-    private String nativeLibrariesDependenciesHardwareArchitectureDefault;
-
-    /**
      * <p>Classifier to add to the artifact generated. If given, the artifact will be an attachment instead.</p>
      *
      * @parameter
      */
     private String classifier;
-
-    /**
-     * <p>Override hardware architecture for native library dependencies (with {@code &lt;type>so&lt;/type>}).</p>
-     * <p>This overrides any classifier on native library dependencies, and
-     * any {@code nativeLibrariesDependenciesHardwareArchitectureDefault}.</p>
-     * <p>Valid values currently include {@code armeabi} and {@code armeabi-v7a}.</p>
-     * <pre>
-     * &lt;configuration&gt;
-     *   ...
-     *    &lt;nativeLibrariesDependenciesHardwareArchitectureOverrides&gt;
-     *      &lt;nativeLibrariesDependenciesHardwareArchitectureOverride&gt;
-     *        armeabi
-     *      &lt;/nativeLibrariesDependenciesHardwareArchitectureOverride&gt;
-     *   &lt;/nativeLibrariesDependenciesHardwareArchitectureOverrides&gt;
-     *   ...
-     * &lt;/configuration&gt;
-     * </pre>
-     *
-     * @parameter expression="${android.nativeLibrariesDependenciesHardwareArchitectureOverrides}" default-value=""
-     */
-    private List<String> nativeLibrariesDependenciesHardwareArchitectureOverrides;
 
     /**
      * <p>Additional source directories that contain resources to be packaged into the apk.</p>
@@ -257,6 +228,18 @@ public class ApkMojo extends AbstractAndroidMojo
     private String ndkFinalLibraryName;
 
     /**
+     * Specify a list of patterns that are matched against the names of jar file
+     * dependencies. Matching jar files will not have their resources added to the
+     * resulting APK.
+     * 
+     * The patterns are standard Java regexes.
+     * 
+     * @parameter
+     */
+    private String[] excludeJarResources;
+    private Pattern[] excludeJarResourcesPatterns;
+    
+    /**
      * Embedded configuration of this mojo.
      *
      * @parameter
@@ -286,6 +269,19 @@ public class ApkMojo extends AbstractAndroidMojo
 
         generateIntermediateApk();
 
+        // Compile resource exclusion patterns, if any
+        if ( excludeJarResources != null && excludeJarResources.length > 0 ) 
+        {
+          getLog().debug( "Compiling " + excludeJarResources.length + " patterns" );
+          
+          excludeJarResourcesPatterns = new Pattern[excludeJarResources.length];
+          
+          for ( int index = 0; index < excludeJarResources.length; ++index ) 
+          {
+            excludeJarResourcesPatterns[index] = Pattern.compile( excludeJarResources[index] );
+          }
+        }
+        
         // Initialize apk build configuration
         File outputFile = new File( project.getBuild().getDirectory(), project.getBuild().getFinalName() + "." + APK );
         final boolean signWithDebugKeyStore = getAndroidSigner().isSignWithDebugKeyStore();
@@ -566,6 +562,33 @@ public class ApkMojo extends AbstractAndroidMojo
 
         for ( File jarFile : jarFiles )
         {
+            boolean excluded = false;
+          
+            if ( excludeJarResourcesPatterns != null )
+            {
+                final String name = jarFile.getName();
+                getLog().debug( "Checking " + name + " against patterns" );
+                for ( Pattern pattern : excludeJarResourcesPatterns )
+                {
+                    final Matcher matcher = pattern.matcher( name );
+                    if ( matcher.matches() ) 
+                    {
+                        getLog().debug( "Jar " + name + " excluded by pattern " + pattern );
+                        excluded = true;
+                        break;
+                    } 
+                    else 
+                    {
+                        getLog().debug( "Jar " + name + " not excluded by pattern " + pattern );
+                    }
+                }
+            }
+
+            if ( excluded )
+            {
+                continue;
+            }
+            
             if ( jarFile.isDirectory() )
             {
                 String[] filenames = jarFile.list( new FilenameFilter()
@@ -748,10 +771,10 @@ public class ApkMojo extends AbstractAndroidMojo
         }
 
 
-        getLog().info( getAndroidSdk().getPathForTool( "apkbuilder" ) + " " + commands.toString() );
+        getLog().info( getAndroidSdk().getApkBuilderPath() + " " + commands.toString() );
         try
         {
-            executor.executeCommand( getAndroidSdk().getPathForTool( "apkbuilder" ), commands, project.getBasedir(),
+            executor.executeCommand( getAndroidSdk().getApkBuilderPath(), commands, project.getBasedir(),
                     false );
         }
         catch ( ExecutionException e )
@@ -769,16 +792,9 @@ public class ApkMojo extends AbstractAndroidMojo
 
     private void processNativeLibraries( final List<File> natives ) throws MojoExecutionException
     {
-        if ( nativeLibrariesDependenciesHardwareArchitectureOverrides.isEmpty() )
+        for ( String ndkArchitecture : AndroidNdk.NDK_ARCHITECTURES )
         {
-            processNativeLibraries( natives, nativeLibrariesDependenciesHardwareArchitectureDefault );
-        }
-        else
-        {
-            for ( String ndkArchitecture : nativeLibrariesDependenciesHardwareArchitectureOverrides )
-            {
-                processNativeLibraries( natives, ndkArchitecture );
-            }
+            processNativeLibraries( natives, ndkArchitecture );
         }
     }
 
@@ -847,7 +863,8 @@ public class ApkMojo extends AbstractAndroidMojo
                 {
                     for ( Artifact resolvedArtifact : artifacts )
                     {
-                        if ( "so".equals( resolvedArtifact.getType() ) )
+                        if ( "so".equals( resolvedArtifact.getType() ) && ndkArchitecture.equals(
+                             resolvedArtifact.getClassifier() ) )
                         {
                             final File artifactFile = resolvedArtifact.getFile();
                             try
@@ -892,7 +909,6 @@ public class ApkMojo extends AbstractAndroidMojo
 
                 // Finally, think about copying the gdbserver binary into the APK output as well
                 optionallyCopyGdbServer( destinationDirectory, ndkArchitecture );
-
             }
         }
     }
@@ -902,11 +918,11 @@ public class ApkMojo extends AbstractAndroidMojo
 
         try
         {
-            if ( apkDebug )
+            final File destDir = new File( destinationDirectory, architecture );
+            if ( apkDebug && destDir.exists() )
             {
                 // Copy the gdbserver binary to libs/<architecture>/
-                final File gdbServerFile = getAndroidNdk().getGdbServer( apkNativeToolchain );
-                final File destDir = new File( destinationDirectory, architecture );
+                final File gdbServerFile = getAndroidNdk().getGdbServer( architecture );
                 final File destFile = new File( destDir, "gdbserver" );
                 if ( ! destFile.exists() )
                 {
@@ -929,28 +945,9 @@ public class ApkMojo extends AbstractAndroidMojo
     private File getFinalDestinationDirectoryFor( Artifact resolvedArtifact, File destinationDirectory,
                                                   String ndkArchitecture )
     {
-        final String hardwareArchitecture = getHardwareArchitectureFor( resolvedArtifact, ndkArchitecture );
-
-        File finalDestinationDirectory = new File( destinationDirectory, hardwareArchitecture + "/" );
-
+        File finalDestinationDirectory = new File( destinationDirectory, ndkArchitecture + "/" );
         finalDestinationDirectory.mkdirs();
         return finalDestinationDirectory;
-    }
-
-    private String getHardwareArchitectureFor( Artifact resolvedArtifact, String ndkArchitecture )
-    {
-        if ( !nativeLibrariesDependenciesHardwareArchitectureOverrides.isEmpty() )
-        {
-            return ndkArchitecture;
-        }
-
-        final String classifier = resolvedArtifact.getClassifier();
-        if ( StringUtils.isNotBlank( classifier ) )
-        {
-            return classifier;
-        }
-
-        return nativeLibrariesDependenciesHardwareArchitectureDefault;
     }
 
     private void copyLocalNativeLibraries( final File localNativeLibrariesDirectory, final File destinationDirectory )
@@ -1093,10 +1090,20 @@ public class ApkMojo extends AbstractAndroidMojo
             commands.add( aaptExtraArg );
         }
 
-        getLog().info( getAndroidSdk().getPathForTool( "aapt" ) + " " + commands.toString() );
+        if ( !release )
+        {
+            getLog().info( "Enabling debug build for apk." );
+            commands.add( "--debug-mode" );
+        }
+        else 
+        {
+            getLog().info( "Enabling release build for apk." );
+        }
+
+        getLog().info( getAndroidSdk().getAaptPath() + " " + commands.toString() );
         try
         {
-            executor.executeCommand( getAndroidSdk().getPathForTool( "aapt" ), commands, project.getBasedir(), false );
+            executor.executeCommand( getAndroidSdk().getAaptPath(), commands, project.getBasedir(), false );
         }
         catch ( ExecutionException e )
         {

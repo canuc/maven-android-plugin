@@ -16,12 +16,13 @@
 package com.jayway.maven.plugins.android.standalonemojos;
 
 import com.android.ddmlib.AdbCommandRejectedException;
+import com.android.ddmlib.CollectingOutputReceiver;
 import com.android.ddmlib.IDevice;
-import com.android.ddmlib.NullOutputReceiver;
 import com.android.ddmlib.ShellCommandUnresponsiveException;
 import com.android.ddmlib.TimeoutException;
 import com.jayway.maven.plugins.android.AbstractAndroidMojo;
 import com.jayway.maven.plugins.android.DeviceCallback;
+import com.jayway.maven.plugins.android.common.DeviceHelper;
 import com.jayway.maven.plugins.android.config.ConfigHandler;
 import com.jayway.maven.plugins.android.config.ConfigPojo;
 import com.jayway.maven.plugins.android.config.PullParameter;
@@ -239,8 +240,22 @@ public class RunMojo extends AbstractAndroidMojo
                 LauncherInfo launcherInfo;
 
                 launcherInfo = new LauncherInfo();
-                launcherInfo.activity = activities.item( 0 ).getAttributes().getNamedItem( "android:name" )
+                String activityName = activities.item( 0 ).getAttributes().getNamedItem( "android:name" )
                         .getNodeValue();
+
+                if ( ! activityName.contains( "." ) )
+                {
+                    activityName = "." + activityName;
+                }
+
+                if ( activityName.startsWith( "." ) )
+                {
+                    String packageName = document.getElementsByTagName( "manifest" ).item( 0 ).getAttributes()
+                            .getNamedItem( "package" ).getNodeValue();
+                    activityName = packageName + activityName;
+                }
+
+                launcherInfo.activity = activityName;
 
                 launcherInfo.packageName = renameManifestPackage != null
                     ? renameManifestPackage
@@ -279,27 +294,35 @@ public class RunMojo extends AbstractAndroidMojo
             @Override
             public void doWithDevice( IDevice device ) throws MojoExecutionException, MojoFailureException
             {
+                String deviceLogLinePrefix = DeviceHelper.getDeviceLogLinePrefix( device );
+
                 try
                 {
-                    getLog().info( "Attempting to start " + info.packageName + "/" + info.activity + " on device "
-                            + device.getSerialNumber() + " (avdName = " + device.getAvdName() + ")" );
-                    device.executeShellCommand( command, new NullOutputReceiver() );
+                    getLog().info( deviceLogLinePrefix + "Attempting to start " + info.packageName + "/" 
+                            + info.activity );
+
+                    CollectingOutputReceiver shellOutput = new CollectingOutputReceiver();
+                    device.executeShellCommand( command, shellOutput );
+                    if ( shellOutput.getOutput().contains( "Error" ) )
+                    {
+                        throw new MojoFailureException( shellOutput.getOutput() );
+                    }
                 }
                 catch ( IOException ex )
                 {
-                    throw new MojoFailureException( "Input/Output error", ex );
+                    throw new MojoFailureException( deviceLogLinePrefix + "Input/Output error", ex );
                 }
                 catch ( TimeoutException ex )
                 {
-                    throw new MojoFailureException( "Command timeout", ex );
+                    throw new MojoFailureException( deviceLogLinePrefix + "Command timeout", ex );
                 }
                 catch ( AdbCommandRejectedException ex )
                 {
-                    throw new MojoFailureException( "ADB rejected the command", ex );
+                    throw new MojoFailureException( deviceLogLinePrefix + "ADB rejected the command", ex );
                 }
                 catch ( ShellCommandUnresponsiveException ex )
                 {
-                    throw new MojoFailureException( "Unresponsive command", ex );
+                    throw new MojoFailureException( deviceLogLinePrefix + "Unresponsive command", ex );
                 }
             }
         } );

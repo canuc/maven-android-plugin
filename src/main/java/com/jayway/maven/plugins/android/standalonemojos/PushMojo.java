@@ -46,6 +46,7 @@ import java.util.Map;
  * @goal push
  * @requiresProject false
  */
+@SuppressWarnings( "unused" )
 public class PushMojo extends AbstractAndroidMojo
 {
 
@@ -112,6 +113,8 @@ public class PushMojo extends AbstractAndroidMojo
         {
             public void doWithDevice( final IDevice device ) throws MojoExecutionException
             {
+                String deviceLogLinePrefix = DeviceHelper.getDeviceLogLinePrefix( device );
+
                 // message will be set in for each loop according to the processed files
                 String message = "";
 
@@ -124,7 +127,7 @@ public class PushMojo extends AbstractAndroidMojo
                         String sourcePath = pushFileEntry.getKey();
                         String destinationPath = pushFileEntry.getValue();
 
-                        message = "Push of " + sourcePath + " to " + destinationPath + " on "
+                        message = deviceLogLinePrefix + "Push of " + sourcePath + " to " + destinationPath + " on "
                                 + DeviceHelper.getDescriptiveName( device );
 
                         syncService.pushFile( sourcePath, destinationPath, new LogSyncProgressMonitor( getLog() ) );
@@ -193,7 +196,7 @@ public class PushMojo extends AbstractAndroidMojo
                     // make the file's path relative - this is kind of a hack but it
                     // works just fine in this controlled environment
                     String filePath = file.getAbsolutePath().substring( sourceFile.getAbsolutePath().length() );
-
+                    filePath = filePath.replace( System.getProperty( "file.separator" ), "/" );
                     result.put( file.getAbsolutePath(), destinationPath + filePath );
                 }
             }

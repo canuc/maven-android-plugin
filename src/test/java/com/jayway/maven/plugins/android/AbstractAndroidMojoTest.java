@@ -48,7 +48,7 @@ public class AbstractAndroidMojoTest {
         SdkTestSupport testSupport = new SdkTestSupport();
         androidMojo = new EmptyAndroidMojo();
         Reflection.field("sdkPath").ofType(File.class).in(androidMojo).set(null);
-        Reflection.field("sdkPlatform").ofType(String.class).in(androidMojo).set("1.6");
+        Reflection.field("sdkPlatform").ofType(String.class).in(androidMojo).set("4.1.2");
         AndroidSdk sdk = androidMojo.getAndroidSdk();
         File path = Reflection.field("sdkPath").ofType(File.class).in(sdk).get();
         Assert.assertEquals(new File(testSupport.getEnv_ANDROID_HOME()).getAbsolutePath(), path.getAbsolutePath());
@@ -91,16 +91,16 @@ public class AbstractAndroidMojoTest {
     }
 
     @Test
-    public void givenApidemosApkThenPackageIsFound() throws IOException, MojoExecutionException {
+    public void givenApidemosApkThenPackageIsFound() throws IOException, MojoExecutionException, URISyntaxException {
         final URL    resource     = this.getClass().getResource("apidemos-0.1.0-SNAPSHOT.apk");
-        final String foundPackage = androidMojo.extractPackageNameFromApk(new File(resource.getFile()));
+        final String foundPackage = androidMojo.extractPackageNameFromApk(new File(new URI(resource.toString())));
         Assert.assertEquals("com.example.android.apis", foundPackage);
     }
 
     @Test
-    public void givenApidemosPlatformtestsApkThenPackageIsFound() throws IOException, MojoExecutionException {
+    public void givenApidemosPlatformtestsApkThenPackageIsFound() throws IOException, MojoExecutionException, URISyntaxException {
         final URL    resource     = this.getClass().getResource("apidemos-platformtests-0.1.0-SNAPSHOT.apk");
-        final String foundPackage = androidMojo.extractPackageNameFromApk(new File(resource.getFile()));
+        final String foundPackage = androidMojo.extractPackageNameFromApk(new File(new URI(resource.toString())));
         Assert.assertEquals("com.example.android.apis.tests", foundPackage);
     }
 
@@ -108,7 +108,7 @@ public class AbstractAndroidMojoTest {
 
         @Override
         protected AndroidSdk getAndroidSdk() {
-            return new SdkTestSupport().getSdk_with_platform_1_5();
+            return new SdkTestSupport().getSdk_with_platform_default();
         }
 
         public void execute() throws MojoExecutionException, MojoFailureException {

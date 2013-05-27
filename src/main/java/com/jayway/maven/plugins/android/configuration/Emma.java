@@ -22,9 +22,19 @@ public class Emma
     private String classFolders;
 
     /**
-     * Mirror of {@link com.jayway.maven.plugins.android.phase08preparepackage.EmmaMojo#emnaOutputMetaFile}
+     * Mirror of {@link com.jayway.maven.plugins.android.phase08preparepackage.EmmaMojo#emmaOutputMetaFile}
      */
     private String outputMetaFile;
+
+    /**
+     * Mirror of {@link com.jayway.maven.plugins.android.phase08preparepackage.EmmaMojo#emmaFilters}
+     */
+    private String filters;
+
+    public String getFilters()
+    {
+        return filters;
+    }
 
     public Boolean isEnable()
     {
