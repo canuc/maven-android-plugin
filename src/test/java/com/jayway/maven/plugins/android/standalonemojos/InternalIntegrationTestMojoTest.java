@@ -21,6 +21,7 @@ import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -34,9 +35,11 @@ import com.android.ddmlib.AdbCommandRejectedException;
 import com.android.ddmlib.Client;
 import com.android.ddmlib.FileListingService;
 import com.android.ddmlib.IDevice;
+import com.android.ddmlib.IDevice.Feature;
 import com.android.ddmlib.IShellOutputReceiver;
 import com.android.ddmlib.InstallException;
 import com.android.ddmlib.RawImage;
+import com.android.ddmlib.ScreenRecorderOptions;
 import com.android.ddmlib.ShellCommandUnresponsiveException;
 import com.android.ddmlib.SyncException;
 import com.android.ddmlib.SyncService;
@@ -303,10 +306,32 @@ public class InternalIntegrationTestMojoTest extends AbstractAndroidMojoTestCase
                     }
 
                     @Override
+                    public void executeShellCommand(String s, IShellOutputReceiver iShellOutputReceiver, long l, TimeUnit timeUnit)
+                        throws TimeoutException, AdbCommandRejectedException, ShellCommandUnresponsiveException, IOException
+                    {
+                    }
+
+                    @Override
                     public void removeForward(int arg0, String arg1, DeviceUnixSocketNamespace arg2)
                             throws TimeoutException, AdbCommandRejectedException, IOException
                     {
                     }
+
+                    @Override
+                    public boolean supportsFeature(Feature feature) {
+                        return false;
+                    }
+
+                    @Override
+                    public void startScreenRecorder(String remoteFilePath,
+                            ScreenRecorderOptions options,
+                            IShellOutputReceiver receiver)
+                            throws TimeoutException,
+                            AdbCommandRejectedException, IOException,
+                            ShellCommandUnresponsiveException {
+                    }
+                    
+                    
                 });
                 return null;
             }

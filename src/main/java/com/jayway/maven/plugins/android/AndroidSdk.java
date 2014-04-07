@@ -16,6 +16,8 @@
 package com.jayway.maven.plugins.android;
 
 import com.android.SdkConstants;
+import com.android.sdklib.AndroidTargetHash;
+import com.android.sdklib.AndroidVersion;
 import com.android.sdklib.BuildToolInfo;
 import com.android.sdklib.IAndroidTarget;
 import com.android.sdklib.SdkManager;
@@ -35,7 +37,11 @@ import java.util.Properties;
  */
 public class AndroidSdk
 {
-
+    /**
+     * the default API level for the SDK used as a fall back if none is supplied, 
+     * should ideally point to the latest available version
+     */
+    private static final String DEFAULT_ANDROID_API_LEVEL = "19";
     /**
      * property file in each platform folder with details about platform.
      */
@@ -59,11 +65,11 @@ public class AndroidSdk
     private File platformToolsPath;
     private File toolsPath;
 
-    private IAndroidTarget androidTarget;
+    private final IAndroidTarget androidTarget;
     private SdkManager sdkManager;
     private int sdkMajorVersion;
 
-    public AndroidSdk( File sdkPath, String platformOrApiLevel )
+    public AndroidSdk( File sdkPath, String apiLevel )
     {
         this.sdkPath = sdkPath;
 
@@ -75,23 +81,20 @@ public class AndroidSdk
 
             if ( sdkManager == null )
             {
-                throw invalidSdkException( sdkPath, platformOrApiLevel );
+                throw invalidSdkException( sdkPath, apiLevel );
             }
         }
         loadSDKToolsMajorVersion();
 
-        if ( platformOrApiLevel == null )
+        if ( apiLevel == null )
         {
-            throw new InvalidConfigurationException( " No Android Platform Version/API Level has been configured. " 
-                    + " Add e.g. <sdk><platform>17</platform></sdk> to the plugin configuration." );
+            apiLevel = DEFAULT_ANDROID_API_LEVEL;
         }
-        else
+
+        androidTarget = findPlatformByApiLevel( apiLevel );
+        if ( androidTarget == null )
         {
-            androidTarget = findPlatformByNameOrApiLevel( platformOrApiLevel );
-            if ( androidTarget == null )
-            {
-                throw invalidSdkException( sdkPath, platformOrApiLevel );
-            }
+            throw invalidSdkException( sdkPath, apiLevel );
         }
     }
 
@@ -102,56 +105,35 @@ public class AndroidSdk
                 + File.separator + "tools" + File.separator + "android update sdk --no-ui --obsolete --force" );
     }
 
-    private IAndroidTarget findPlatformByNameOrApiLevel( String platformOrApiLevel )
+    private IAndroidTarget findPlatformByApiLevel( String apiLevel )
     {
         // try find by api level first
-        IAndroidTarget target = sdkManager.getTargetFromHashString(
-                IAndroidTarget.PLATFORM_HASH_PREFIX + platformOrApiLevel );
-        if ( target != null )
+        AndroidVersion version = null;
+        try
         {
-            return target;
+            version = new AndroidVersion( apiLevel );
+            String hashString = AndroidTargetHash.getPlatformHashString( version );
+            IAndroidTarget target = sdkManager.getTargetFromHashString( hashString );
+
+            if ( target != null )
+            {
+                return target;
+            }
+        }
+        catch ( AndroidVersion.AndroidVersionException ignore )
+        {
+            throw new InvalidSdkException( "Error AndroidVersion: " + ignore.getMessage() );
         }
 
         // fallback to searching for platform on standard Android platforms (isPlatform() is true)
         for ( IAndroidTarget t: sdkManager.getTargets() )
         {
-            if ( t.isPlatform() && t.getVersionName().equals( platformOrApiLevel ) )
+            if ( t.isPlatform() && t.getVersionName().equals( apiLevel ) )
             {
                 return t;
             }
         }
         return null;
-    }
-
-
-
-    /**
-     * The file system layout of the SDK. Should probably be removed since the 15 layout is very old and probably wont
-     * work completely. No urgency though..
-     */
-    public enum Layout
-    {
-        LAYOUT_1_5, LAYOUT_2_3;
-    }
-    public Layout getLayout()
-    {
-
-        assertPathIsDirectory( sdkPath );
-
-
-        if ( platformToolsPath.exists() && platformToolsPath.isDirectory() )
-        {
-            return Layout.LAYOUT_2_3;
-        }
-
-        final File platforms = new File( sdkPath, PLATFORMS_FOLDER_NAME );
-        if ( platforms.exists() && platforms.isDirectory() )
-        {
-            return Layout.LAYOUT_1_5;
-        }
-
-        throw new InvalidSdkException( "Android SDK could not be identified from path \"" + sdkPath + "\". "
-                + PARAMETER_MESSAGE );
     }
 
     private void assertPathIsDirectory( final File path )
@@ -314,27 +296,14 @@ public class AndroidSdk
      */
     public File getAndroidJar() throws MojoExecutionException
     {
-        return new File( androidTarget.getPath( IAndroidTarget.ANDROID_JAR ) );
-    }
-
-    /**
-     * Resolves the sdklib.jar from this SDK.
-     * 
-     * @return a <code>File</code> pointing to the sdklib.jar file.
-     * @throws org.apache.maven.plugin.MojoExecutionException
-     *             if the file can not be resolved.
-     */
-    public File getSDKLibJar() throws MojoExecutionException
-    {
-        // The file is sdkPath/tools/lib/sdklib.jar
-        File sdklib = new File( sdkPath + "/tools/lib/sdklib.jar" );
-        if ( sdklib.exists() )
+        final String androidJarPath = androidTarget.getPath( IAndroidTarget.ANDROID_JAR );
+        if ( androidJarPath == null )
         {
-            return sdklib;
+            throw new MojoExecutionException( "No AndroidJar found for " + androidTarget );
         }
-        throw new MojoExecutionException( "Can't find the 'sdklib.jar' : " + sdklib.getAbsolutePath() );
+        return new File ( androidJarPath );
     }
-
+  
     /**
      * Resolves the path for this SDK.
      * 

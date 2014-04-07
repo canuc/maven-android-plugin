@@ -1,25 +1,26 @@
 package com.jayway.maven.plugins.android.phase05compile;
 
-import com.jayway.maven.plugins.android.common.AetherHelper;
 import com.jayway.maven.plugins.android.common.AndroidExtension;
+import com.jayway.maven.plugins.android.common.ArtifactResolverHelper;
+import com.jayway.maven.plugins.android.common.UnpackedLibHelper;
+import com.jayway.maven.plugins.android.common.Const;
 import com.jayway.maven.plugins.android.common.JarHelper;
 import com.jayway.maven.plugins.android.common.NativeHelper;
-
 import org.apache.commons.io.FileUtils;
 import org.apache.commons.io.FilenameUtils;
 import org.apache.commons.io.filefilter.TrueFileFilter;
 import org.apache.maven.artifact.Artifact;
 import org.apache.maven.artifact.DefaultArtifact;
+import org.apache.maven.artifact.handler.ArtifactHandler;
 import org.apache.maven.plugin.MojoExecutionException;
 import org.apache.maven.plugin.logging.Log;
-import org.sonatype.aether.RepositorySystem;
-import org.sonatype.aether.RepositorySystemSession;
-import org.sonatype.aether.repository.RemoteRepository;
 
 import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Iterator;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.jar.JarEntry;
@@ -63,29 +64,27 @@ public class MakefileHelper
         }
     }
 
-    private Log log;
-    private final RepositorySystem repoSystem;
-    private final RepositorySystemSession repoSession;
-    private final List<RemoteRepository> projectRepos;
+    private final Log log;
+    private final UnpackedLibHelper unpackedLibHelper;
+    private final ArtifactResolverHelper artifactResolverHelper;
+    private final ArtifactHandler harArtifactHandler;
     private final File unpackedApkLibsDirectory;
     
     /**
      * Initialize the MakefileHelper by storing the supplied parameters to local variables.
-     * @param log
-     * @param repoSystem
-     * @param repoSession
-     * @param projectRepos
-     * @param unpackedApkLibsDirectory
+     * @param log                       Log to which to write log output.
+     * @param unpackedLibHelper               UnpackedLibHelper to use to resolve any artifacts.
+     * @param artifactResolverHelper    ArtifactResolverHelper to use to resolve the artifacts.
+     * @param harHandler                ArtifactHandler for har files.
+     * @param unpackedApkLibsDirectory  Folder in which apklibs are unpacked.
      */
-    public MakefileHelper( Log log,
-                           RepositorySystem repoSystem, RepositorySystemSession repoSession, 
-                           List<RemoteRepository> projectRepos, 
-                           File unpackedApkLibsDirectory )
+    public MakefileHelper( Log log, UnpackedLibHelper unpackedLibHelper, ArtifactResolverHelper artifactResolverHelper,
+                           ArtifactHandler harHandler, File unpackedApkLibsDirectory )
     {
         this.log = log;
-        this.repoSystem = repoSystem;
-        this.repoSession = repoSession;
-        this.projectRepos = projectRepos;
+        this.unpackedLibHelper = unpackedLibHelper;
+        this.artifactResolverHelper = artifactResolverHelper;
+        this.harArtifactHandler = harHandler;
         this.unpackedApkLibsDirectory = unpackedApkLibsDirectory;
     }
     
@@ -93,8 +92,7 @@ public class MakefileHelper
      * Cleans up all include directories created in the temp directory during the build.
      *
      * @param makefileHolder The holder produced by the
-     * {@link MakefileHelper#createMakefileFromArtifacts(java.io.File, java.util.Set,
-     * boolean, org.sonatype.aether.RepositorySystemSession, java.util.List, org.sonatype.aether.RepositorySystem)}
+     * {@link MakefileHelper#createMakefileFromArtifacts(File, Set, String, String, boolean)}
      */
     public static void cleanupAfterBuild( MakefileHolder makefileHolder )
     {
@@ -123,13 +121,10 @@ public class MakefileHelper
      * @param artifacts         The list of (static library) dependency artifacts to create the Makefile from
      * @param useHeaderArchives If true, the Makefile should include a LOCAL_EXPORT_C_INCLUDES statement, pointing to
      *                          the location where the header archive was expanded
-     * @param repoSession
-     * @param projectRepos
-     * @param repoSystem
      * @return The created Makefile
      */
     public MakefileHolder createMakefileFromArtifacts( File outputDir, Set<Artifact> artifacts,
-                                                              String ndkArchitecture,
+                                                              String ndkArchitecture, String defaultNDKArchitecture,
                                                               boolean useHeaderArchives )
             throws IOException, MojoExecutionException
     {
@@ -155,7 +150,11 @@ public class MakefileHelper
         {
             for ( Artifact artifact : artifacts )
             {
-                boolean apklibStatic = false;
+                final String architecture = NativeHelper.extractArchitectureFromArtifact( artifact,
+                        defaultNDKArchitecture );
+
+                makeFile.append( '\n' );
+                makeFile.append( "ifeq ($(TARGET_ARCH_ABI)," ).append( architecture ).append( ")\n" );
 
                 makeFile.append( "#\n" );
                 makeFile.append( "# Group ID: " );
@@ -175,24 +174,46 @@ public class MakefileHelper
                 makeFile.append( "LOCAL_MODULE    := " );
                 makeFile.append( artifact.getArtifactId() );
                 makeFile.append( '\n' );
-                apklibStatic = addLibraryDetails( makeFile, outputDir, artifact, ndkArchitecture );
+
+                final boolean apklibStatic = addLibraryDetails( makeFile, outputDir, artifact, ndkArchitecture );
+
                 if ( useHeaderArchives )
                 {
                     try
                     {
-                        Artifact harArtifact = new DefaultArtifact( artifact.getGroupId(), artifact.getArtifactId(),
-                                artifact.getVersion(), artifact.getScope(), "har", artifact.getClassifier(),
-                                artifact.getArtifactHandler() );
-                        final Artifact resolvedHarArtifact = AetherHelper
-                                .resolveArtifact( harArtifact, repoSystem, repoSession, projectRepos );
+                        // Fix for dealing with APKLIBs - unfortunately it does not fully work since
+                        // an APKLIB can contain any number of architectures making it somewhat to resolve the
+                        // related (HAR) artifact.
+                        //
+                        // In this case, we construct the classifier from <architecture> and the artifact classifier
+                        // if it is also present.  Only issue is that if the APKLIB contains more than the armeabi
+                        // libraries (e.g. x86 for examples) the HAR is not resolved correctly.
+                        //
+                        String classifier = artifact.getClassifier();
+                        if ( "apklib".equals( artifact.getType() ) )
+                        {
+                            classifier = ndkArchitecture;
+                            if ( artifact.getClassifier() != null )
+                            {
+                                classifier += "-" + artifact.getClassifier();
+                            }
+                        }
 
-                        File includeDir = new File( System.getProperty( "java.io.tmpdir" ),
+                        Artifact harArtifact = new DefaultArtifact( artifact.getGroupId(), artifact.getArtifactId(),
+                                artifact.getVersion(), artifact.getScope(),
+                                Const.ArtifactType.NATIVE_HEADER_ARCHIVE, classifier,
+                                harArtifactHandler );
+
+                        File resolvedHarArtifactFile = artifactResolverHelper.resolveArtifactToFile( harArtifact );
+                        log.debug( "Resolved har artifact file : " + resolvedHarArtifactFile );
+
+                        final File includeDir = new File( System.getProperty( "java.io.tmpdir" ),
                                 "android_maven_plugin_native_includes" + System.currentTimeMillis() + "_"
-                                        + resolvedHarArtifact.getArtifactId() );
+                                        + harArtifact.getArtifactId() );
                         includeDir.deleteOnExit();
                         includeDirectories.add( includeDir );
 
-                        JarHelper.unjar( new JarFile( resolvedHarArtifact.getFile() ), includeDir,
+                        JarHelper.unjar( new JarFile( resolvedHarArtifactFile ), includeDir,
                                 new JarHelper.UnjarListener()
                                 {
                                     @Override
@@ -214,13 +235,13 @@ public class MakefileHelper
                             log.debug( "Listing LOCAL_EXPORT_C_INCLUDES for " + artifact.getId() + ": " + includes );
                         }
                     }
-                    catch ( Exception e )
+                    catch ( RuntimeException e )
                     {
                         throw new MojoExecutionException(
                                 "Error while resolving header archive file for: " + artifact.getArtifactId(), e );
                     }
                 }
-                if ( "a".equals( artifact.getType() ) || apklibStatic )
+                if ( Const.ArtifactType.NATIVE_IMPLEMENTATION_ARCHIVE.equals( artifact.getType() ) || apklibStatic )
                 {
                     makeFile.append( "include $(PREBUILT_STATIC_LIBRARY)\n" );
                 }
@@ -228,6 +249,10 @@ public class MakefileHelper
                 {
                     makeFile.append( "include $(PREBUILT_SHARED_LIBRARY)\n" );
                 }
+
+                makeFile.append( "endif #" ).append( artifact.getClassifier() ).append( '\n' );
+                makeFile.append( '\n' );
+
             }
         }
         
@@ -252,7 +277,7 @@ public class MakefileHelper
             {
                 int libIdx = findApklibNativeLibrary( staticLibs, artifact.getArtifactId() );
                 apklibStatic = true;
-                addLibraryDetails( makeFile, outputDir, staticLibs[libIdx] );
+                addLibraryDetails( makeFile, outputDir, staticLibs[libIdx], "" );
             }
             else
             {
@@ -263,18 +288,18 @@ public class MakefileHelper
                     throw new IOException( "Failed to find any library file in APKLIB" );
                 }
                 int libIdx = findApklibNativeLibrary( sharedLibs, artifact.getArtifactId() );
-                addLibraryDetails( makeFile, outputDir, sharedLibs[libIdx] );
+                addLibraryDetails( makeFile, outputDir, sharedLibs[libIdx], "" );
             }
         }
         else
         {
-            addLibraryDetails( makeFile, outputDir, artifact.getFile() );
+            addLibraryDetails( makeFile, outputDir, artifact.getFile(), artifact.getArtifactId() );
         }
 
         return apklibStatic;
     }
 
-    private void addLibraryDetails( StringBuilder makeFile, File outputDir, File libFile )
+    private void addLibraryDetails( StringBuilder makeFile, File outputDir, File libFile, String outputName )
         throws IOException
     {
         String localPath = resolveRelativePath( outputDir, libFile );
@@ -287,7 +312,14 @@ public class MakefileHelper
         makeFile.append( libFile.getName() );
         makeFile.append( '\n' );
         makeFile.append( "LOCAL_MODULE_FILENAME := " );
-        makeFile.append( FilenameUtils.removeExtension( libFile.getName() ) );
+        if ( "".equals( outputName ) )
+        {
+            makeFile.append( FilenameUtils.removeExtension( libFile.getName() ) );
+        }
+        else
+        {
+            makeFile.append( outputName );
+        }
         makeFile.append( '\n' );
     }
 
@@ -468,29 +500,42 @@ public class MakefileHelper
                                      String ndkArchitecture,
                                      boolean staticLibrary )
     {
-        StringBuilder sb = new StringBuilder();
+        Set<String> libraryNames = new LinkedHashSet<String>();
 
         for ( Artifact a : resolvedLibraryList )
         {
-            if ( staticLibrary && "a".equals( a.getType() ) )
+            if ( staticLibrary && Const.ArtifactType.NATIVE_IMPLEMENTATION_ARCHIVE.equals( a.getType() ) )
             {
-                sb.append( a.getArtifactId() );
+                libraryNames.add( a.getArtifactId() );
             }
-            if ( ! staticLibrary && "so".equals( a.getType() ) )
+            if ( ! staticLibrary && Const.ArtifactType.NATIVE_SYMBOL_OBJECT.equals( a.getType() ) )
             {
-                sb.append( a.getArtifactId() );
+                libraryNames.add( a.getArtifactId() );
             }
-            if ( AndroidExtension.APKLIB.equals( a.getType() ) )
+            if ( AndroidExtension.APKLIB.equals( a.getType() ) || AndroidExtension.AAR.equals( a.getType() ) )
             {
                 File[] libFiles = NativeHelper.listNativeFiles( a, unpackedApkLibsDirectory, 
                                                                 ndkArchitecture, staticLibrary );
                 if ( libFiles != null && libFiles.length > 0 )
                 {
-                    sb.append( a.getArtifactId() );
+                    libraryNames.add( a.getArtifactId() );
                 }
                 
             }
-            sb.append( " " );
+        }
+
+        StringBuilder sb = new StringBuilder();
+
+        Iterator<String> iter = libraryNames.iterator();
+
+        while ( iter.hasNext() )
+        {
+            sb.append( iter.next() );
+
+            if ( iter.hasNext() )
+            {
+                sb.append( " " );
+            }
         }
 
         return sb.toString();

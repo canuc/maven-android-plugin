@@ -16,6 +16,10 @@
  */
 package com.jayway.maven.plugins.android.phase09package;
 
+import com.android.sdklib.build.ApkBuilder;
+import com.android.sdklib.build.ApkCreationException;
+import com.android.sdklib.build.DuplicateFileException;
+import com.android.sdklib.build.SealedApkException;
 import com.jayway.maven.plugins.android.AbstractAndroidMojo;
 import com.jayway.maven.plugins.android.AndroidNdk;
 import com.jayway.maven.plugins.android.AndroidSigner;
@@ -26,6 +30,7 @@ import com.jayway.maven.plugins.android.config.ConfigHandler;
 import com.jayway.maven.plugins.android.config.ConfigPojo;
 import com.jayway.maven.plugins.android.config.PullParameter;
 import com.jayway.maven.plugins.android.configuration.Apk;
+import com.jayway.maven.plugins.android.configuration.MetaInf;
 import com.jayway.maven.plugins.android.configuration.Sign;
 import org.apache.commons.io.FileUtils;
 import org.apache.commons.io.filefilter.DirectoryFileFilter;
@@ -34,12 +39,9 @@ import org.apache.commons.io.filefilter.FileFilterUtils;
 import org.apache.commons.io.filefilter.IOFileFilter;
 import org.apache.commons.lang.StringUtils;
 import org.apache.maven.artifact.Artifact;
-import org.apache.maven.artifact.factory.ArtifactFactory;
 import org.apache.maven.plugin.MojoExecutionException;
 import org.apache.maven.plugin.MojoFailureException;
 import org.codehaus.plexus.util.AbstractScanner;
-import org.codehaus.plexus.util.DirectoryScanner;
-import org.codehaus.plexus.util.SelectorUtils;
 
 import java.io.File;
 import java.io.FileFilter;
@@ -62,6 +64,7 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 import java.util.zip.ZipOutputStream;
 
+import static com.jayway.maven.plugins.android.common.AndroidExtension.AAR;
 import static com.jayway.maven.plugins.android.common.AndroidExtension.APK;
 import static com.jayway.maven.plugins.android.common.AndroidExtension.APKLIB;
 
@@ -118,6 +121,8 @@ public class ApkMojo extends AbstractAndroidMojo
      * Look to aapt for more help on this. </p>
      *
      * @parameter expression="${android.renameInstrumentationTargetPackage}"
+     *
+     * TODO pass this into AaptExecutor
      */
     private String renameInstrumentationTargetPackage;
 
@@ -167,13 +172,6 @@ public class ApkMojo extends AbstractAndroidMojo
     private File[] sourceDirectories;
 
     /**
-     * @component
-     * @readonly
-     * @required
-     */
-    protected ArtifactFactory artifactFactory;
-
-    /**
      * Pattern for additional META-INF resources to be packaged into the apk.
      * <p>
      * The APK builder filters these resources and doesn't include them into the apk.
@@ -201,10 +199,19 @@ public class ApkMojo extends AbstractAndroidMojo
      * See also <a href="http://code.google.com/p/maven-android-plugin/issues/detail?id=97">Issue 97</a>
      * </p>
      *
-     * @parameter expression="${android.apk.metaIncludes}" default-value=""
+     * @parameter expression="${android.apk.metaIncludes}"
+     * @deprecated in favour of apk.metaInf
      */
-    @PullParameter( defaultValueGetterMethod = "getDefaultMetaIncludes" )
+    @PullParameter
     private String[] apkMetaIncludes;
+
+    @PullParameter( defaultValueGetterMethod = "getDefaultMetaInf" )
+    private MetaInf apkMetaInf;
+
+    /**
+     * @parameter alias="metaInf"
+     */
+    private MetaInf pluginMetaInf;
 
     /**
      * Defines whether or not the APK is being produced in debug mode or not.
@@ -250,6 +257,15 @@ public class ApkMojo extends AbstractAndroidMojo
     private static final Pattern PATTERN_JAR_EXT = Pattern.compile( "^.+\\.jar$", 2 );
 
     /**
+     * <p>Default hardware architecture for native library dependencies (with {@code &lt;type>so&lt;/type>})
+     * without a classifier.</p>
+     * <p>Valid values currently include {@code armeabi}, {@code armeabi-v7a}, {@code mips} and {@code x86}.</p>
+     *
+     * @parameter expression="${android.nativeLibrariesDependenciesHardwareArchitectureDefault}" default-value="armeabi"
+     */
+    private String nativeLibrariesDependenciesHardwareArchitectureDefault;
+
+    /**
      *
      * @throws MojoExecutionException
      * @throws MojoFailureException
@@ -263,7 +279,7 @@ public class ApkMojo extends AbstractAndroidMojo
             return;
         }
 
-        ConfigHandler cfh = new ConfigHandler( this );
+        ConfigHandler cfh = new ConfigHandler( this, this.session, this.execution );
 
         cfh.parseConfiguration();
 
@@ -329,35 +345,14 @@ public class ApkMojo extends AbstractAndroidMojo
         ArrayList<File> jarFiles = new ArrayList<File>();
         ArrayList<File> nativeFolders = new ArrayList<File>();
 
-        boolean useInternalAPKBuilder = true;
-        try
-        {
-            initializeAPKBuilder();
-            // Ok...
-            // So we can try to use the internal ApkBuilder
-        }
-        catch ( Throwable e )
-        {
-            // Not supported platform try to old way.
-            useInternalAPKBuilder = false;
-        }
-
         // Process the native libraries, looking both in the current build directory as well as
         // at the dependencies declared in the pom.  Currently, all .so files are automatically included
         processNativeLibraries( nativeFolders );
         
-        if ( useInternalAPKBuilder )
-        {
-            doAPKWithAPKBuilder( outputFile, dexFile, zipArchive, sourceFolders, jarFiles, nativeFolders,
+        doAPKWithAPKBuilder( outputFile, dexFile, zipArchive, sourceFolders, jarFiles, nativeFolders,
                     signWithDebugKeyStore );
-        }
-        else
-        {
-            doAPKWithCommand( outputFile, dexFile, zipArchive, sourceFolders, jarFiles, nativeFolders,
-                    signWithDebugKeyStore );
-        }
 
-        if ( this.apkMetaIncludes != null && this.apkMetaIncludes.length > 0 )
+        if ( this.apkMetaInf != null )
         {
             try
             {
@@ -423,7 +418,7 @@ public class ApkMojo extends AbstractAndroidMojo
                     continue;
                 }
 
-                if ( ! metaInfMatches( zn ) )
+                if ( ! this.apkMetaInf.isIncluded( zn ) )
                 {
                     continue;
                 }
@@ -440,19 +435,6 @@ public class ApkMojo extends AbstractAndroidMojo
         }
 
         zin.close();
-    }
-
-    private boolean metaInfMatches( String path )
-    {
-        for ( String inc : this.apkMetaIncludes )
-        {
-            if ( SelectorUtils.matchPath( "META-INF/" + inc, path ) )
-            {
-                return true;
-            }
-        }
-
-        return false;
     }
 
     private Map<String, List<File>> jars = new HashMap<String, List<File>>();
@@ -547,75 +529,95 @@ public class ApkMojo extends AbstractAndroidMojo
 
             }
         }
-
-        ApkBuilder builder = new ApkBuilder( outputFile, zipArchive, dexFile, signWithDebugKeyStore, null );
-
-        if ( apkDebug )
+        
+        String debugKeyStore;
+        ApkBuilder apkBuilder; 
+        try 
         {
-            builder.setDebugMode( apkDebug );
-        }
-
-        for ( File sourceFolder : sourceFolders )
-        {
-            builder.addSourceFolder( sourceFolder );
-        }
-
-        for ( File jarFile : jarFiles )
-        {
-            boolean excluded = false;
-          
-            if ( excludeJarResourcesPatterns != null )
+            debugKeyStore = ApkBuilder.getDebugKeystore();
+            apkBuilder = 
+                    new ApkBuilder( outputFile, zipArchive, dexFile, 
+                            ( signWithDebugKeyStore ) ? debugKeyStore : null, null );
+            if ( apkDebug )
             {
-                final String name = jarFile.getName();
-                getLog().debug( "Checking " + name + " against patterns" );
-                for ( Pattern pattern : excludeJarResourcesPatterns )
+                apkBuilder.setDebugMode( apkDebug );
+            }
+
+            for ( File sourceFolder : sourceFolders )
+            {
+                apkBuilder.addSourceFolder( sourceFolder );
+            }
+     
+            for ( File jarFile : jarFiles )
+            {
+                boolean excluded = false;
+              
+                if ( excludeJarResourcesPatterns != null )
                 {
-                    final Matcher matcher = pattern.matcher( name );
-                    if ( matcher.matches() ) 
+                    final String name = jarFile.getName();
+                    getLog().debug( "Checking " + name + " against patterns" );
+                    for ( Pattern pattern : excludeJarResourcesPatterns )
                     {
-                        getLog().debug( "Jar " + name + " excluded by pattern " + pattern );
-                        excluded = true;
-                        break;
-                    } 
-                    else 
-                    {
-                        getLog().debug( "Jar " + name + " not excluded by pattern " + pattern );
+                        final Matcher matcher = pattern.matcher( name );
+                        if ( matcher.matches() ) 
+                        {
+                            getLog().debug( "Jar " + name + " excluded by pattern " + pattern );
+                            excluded = true;
+                            break;
+                        } 
+                        else 
+                        {
+                            getLog().debug( "Jar " + name + " not excluded by pattern " + pattern );
+                        }
                     }
+                }
+    
+                if ( excluded )
+                {
+                    continue;
+                }
+                
+                if ( jarFile.isDirectory() )
+                {
+                    String[] filenames = jarFile.list( new FilenameFilter()
+                    {
+                        public boolean accept( File dir, String name )
+                        {
+                            return PATTERN_JAR_EXT.matcher( name ).matches();
+                        }
+                    } );
+    
+                    for ( String filename : filenames )
+                    {
+                        apkBuilder.addResourcesFromJar( new File( jarFile, filename ) );
+                    }
+                }
+                else
+                {
+                    apkBuilder.addResourcesFromJar( jarFile );
                 }
             }
 
-            if ( excluded )
+            for ( File nativeFolder : nativeFolders )
             {
-                continue;
+                apkBuilder.addNativeLibraries( nativeFolder );
             }
-            
-            if ( jarFile.isDirectory() )
-            {
-                String[] filenames = jarFile.list( new FilenameFilter()
-                {
-                    public boolean accept( File dir, String name )
-                    {
-                        return PATTERN_JAR_EXT.matcher( name ).matches();
-                    }
-                } );
-
-                for ( String filename : filenames )
-                {
-                    builder.addResourcesFromJar( new File( jarFile, filename ) );
-                }
-            }
-            else
-            {
-                builder.addResourcesFromJar( jarFile );
-            }
-        }
-
-        for ( File nativeFolder : nativeFolders )
+            apkBuilder.sealApk();
+        } 
+        catch ( ApkCreationException e )
         {
-            builder.addNativeLibraries( nativeFolder, null );
+            throw new MojoExecutionException( e.getMessage() );
+        } 
+        catch ( DuplicateFileException e )
+        {
+            final String msg = String.format( "Duplicated file: %s, found in archive %s and %s",
+                    e.getArchivePath(), e.getFile1(), e.getFile2() );
+            throw new MojoExecutionException( msg, e );
+        } 
+        catch ( SealedApkException e )
+        {
+            throw new MojoExecutionException( e.getMessage() );
         }
-
-        builder.sealApk();
     }
 
     private File removeDuplicatesFromJar( File in, List<String> duplicates )
@@ -718,78 +720,6 @@ public class ApkMojo extends AbstractAndroidMojo
         }
     }
 
-
-    /**
-     * Creates the APK file using the command line.
-     *
-     * @param outputFile            the output file
-     * @param dexFile               the dex file
-     * @param zipArchive            the classes folder
-     * @param sourceFolders         the resources
-     * @param jarFiles              the embedded java files
-     * @param nativeFolders         the native folders
-     * @param signWithDebugKeyStore enables the signature of the APK using the debug key
-     * @throws MojoExecutionException if the APK cannot be created.
-     */
-    private void doAPKWithCommand( File outputFile, File dexFile, File zipArchive, ArrayList<File> sourceFolders,
-                                   ArrayList<File> jarFiles, ArrayList<File> nativeFolders,
-                                   boolean signWithDebugKeyStore ) throws MojoExecutionException
-    {
-        getLog().debug( "Building APK from command line" );
-        CommandExecutor executor = CommandExecutor.Factory.createDefaultCommmandExecutor();
-        executor.setLogger( this.getLog() );
-
-        List<String> commands = new ArrayList<String>();
-        commands.add( outputFile.getAbsolutePath() );
-
-        if ( ! signWithDebugKeyStore )
-        {
-            commands.add( "-u" );
-        }
-
-        commands.add( "-z" );
-        commands.add( new File( project.getBuild().getDirectory(), project.getBuild().getFinalName() + ".ap_" )
-                .getAbsolutePath() );
-        commands.add( "-f" );
-        commands.add( new File( project.getBuild().getDirectory(), "classes.dex" ).getAbsolutePath() );
-        commands.add( "-rf" );
-        commands.add( new File( project.getBuild().getOutputDirectory() ).getAbsolutePath() );
-
-        if ( nativeFolders != null && ! nativeFolders.isEmpty() )
-        {
-            for ( File lib : nativeFolders )
-            {
-                commands.add( "-nf" );
-                commands.add( lib.getAbsolutePath() );
-            }
-        }
-
-        for ( Artifact artifact : getRelevantCompileArtifacts() )
-        {
-            commands.add( "-rj" );
-            commands.add( artifact.getFile().getAbsolutePath() );
-        }
-
-
-        getLog().info( getAndroidSdk().getApkBuilderPath() + " " + commands.toString() );
-        try
-        {
-            executor.executeCommand( getAndroidSdk().getApkBuilderPath(), commands, project.getBasedir(),
-                    false );
-        }
-        catch ( ExecutionException e )
-        {
-            throw new MojoExecutionException( "", e );
-        }
-    }
-
-
-    private void initializeAPKBuilder() throws MojoExecutionException
-    {
-        File file = getAndroidSdk().getSDKLibJar();
-        ApkBuilder.initialize( getLog(), file );
-    }
-
     private void processNativeLibraries( final List<File> natives ) throws MojoExecutionException
     {
         for ( String ndkArchitecture : AndroidNdk.NDK_ARCHITECTURES )
@@ -812,18 +742,9 @@ public class ApkMojo extends AbstractAndroidMojo
         // Examine the native libraries directory for content. This will only be true if:
         // a) the directory exists
         // b) it contains at least 1 file
-        final boolean hasValidNativeLibrariesDirectory = nativeLibrariesDirectory != null
-                && nativeLibrariesDirectory.exists()
-                && ( nativeLibrariesDirectory.listFiles() != null && nativeLibrariesDirectory.listFiles().length > 0 );
-
-        // Retrieve any native dependencies or attached artifacts.  This may include artifacts from the ndk-build MOJO
-        NativeHelper nativeHelper = new NativeHelper( project, projectRepos, repoSession, repoSystem, artifactFactory,
-                getLog() );
-        final Set<Artifact> artifacts = nativeHelper.getNativeDependenciesArtifacts( unpackedApkLibsDirectory, true );
-
-        final boolean hasValidBuildNativeLibrariesDirectory = nativeLibrariesOutputDirectory.exists() && (
-                nativeLibrariesOutputDirectory.listFiles() != null
-                && nativeLibrariesOutputDirectory.listFiles().length > 0 );
+        final boolean hasValidNativeLibrariesDirectory = hasValidNativeLibrariesDirectory();
+        final boolean hasValidBuildNativeLibrariesDirectory = hasValidBuildNativeLibrariesDirectory();
+        final Set<Artifact> artifacts = getNativeLibraryArtifacts();
 
         if ( artifacts.isEmpty() && hasValidNativeLibrariesDirectory && ! hasValidBuildNativeLibrariesDirectory )
         {
@@ -846,9 +767,7 @@ public class ApkMojo extends AbstractAndroidMojo
                 // In this case, we may have both .so files in it's normal location
                 // as well as .so dependencies
 
-                // Create the ${project.build.outputDirectory}/libs
-                final File destinationDirectory = new File( nativeLibrariesOutputDirectory.getAbsolutePath() );
-                destinationDirectory.mkdirs();
+                final File destinationDirectory = makeNativeLibrariesOutputDirectory();
 
                 // Point directly to the directory
                 addNativeDirectory( natives, destinationDirectory );
@@ -863,46 +782,16 @@ public class ApkMojo extends AbstractAndroidMojo
                 {
                     for ( Artifact resolvedArtifact : artifacts )
                     {
-                        if ( "so".equals( resolvedArtifact.getType() ) && ndkArchitecture.equals(
-                             resolvedArtifact.getClassifier() ) )
+                        if ( NativeHelper.artifactHasHardwareArchitecture( resolvedArtifact,
+                                ndkArchitecture, nativeLibrariesDependenciesHardwareArchitectureDefault ) )
                         {
-                            final File artifactFile = resolvedArtifact.getFile();
-                            try
-                            {
-                                final String artifactId = resolvedArtifact.getArtifactId();
-                                String filename = artifactId.startsWith( "lib" ) 
-                                        ? artifactId + ".so"
-                                        : "lib" + artifactId + ".so";
-                                if ( ndkFinalLibraryName != null 
-                                        && ( resolvedArtifact.getFile().getName()
-                                                .startsWith( "lib" + ndkFinalLibraryName ) ) )
-                                {
-                                    // The artifact looks like one we built with the NDK in this module
-                                    // preserve the name from the NDK build
-                                    filename = resolvedArtifact.getFile().getName();
-                                }
-
-                                final File finalDestinationDirectory = getFinalDestinationDirectoryFor(
-                                        resolvedArtifact, destinationDirectory, ndkArchitecture );
-                                final File file = new File( finalDestinationDirectory, filename );
-                                getLog().debug(
-                                        "Copying native dependency " + artifactId + " (" + resolvedArtifact.getGroupId()
-                                        +
-                                        ") to " + file );
-                                org.apache.commons.io.FileUtils.copyFile( artifactFile, file );
-                            }
-                            catch ( Exception e )
-                            {
-                                throw new MojoExecutionException( "Could not copy native dependency.", e );
-                            }
+                            copyNativeLibraryArtifactFileToDirectory( resolvedArtifact, destinationDirectory,
+                                    ndkArchitecture );
                         }
-                        else
+                        else if ( APKLIB.equals( resolvedArtifact.getType() )
+                                || AAR.equals( resolvedArtifact.getType() ) )
                         {
-                            if ( APKLIB.equals( resolvedArtifact.getType() ) )
-                            {
-                                addNativeDirectory( natives, new File( getLibraryUnpackDirectory( resolvedArtifact )
-                                                                           + "/libs" ) );
-                            }
+                                addNativeDirectory( natives, getUnpackedLibNativesFolder( resolvedArtifact ) );
                         }
                     }
                 }
@@ -912,6 +801,82 @@ public class ApkMojo extends AbstractAndroidMojo
             }
         }
     }
+
+    /**
+     * Examine the native libraries directory for content. This will only be true if:
+     * <ul>
+     * <li>The directory exists</li>
+     * <li>It contains at least 1 file</li>
+     * </ul>
+     */
+    private boolean hasValidNativeLibrariesDirectory()
+    {
+        return nativeLibrariesDirectory != null
+                && nativeLibrariesDirectory.exists()
+                && ( nativeLibrariesDirectory.listFiles() != null && nativeLibrariesDirectory.listFiles().length > 0 );
+    }
+
+    private boolean hasValidBuildNativeLibrariesDirectory()
+    {
+        return nativeLibrariesOutputDirectory.exists() && (
+                nativeLibrariesOutputDirectory.listFiles() != null
+                        && nativeLibrariesOutputDirectory.listFiles().length > 0 );
+    }
+
+    /**
+     * @return Any native dependencies or attached artifacts. This may include artifacts from the ndk-build MOJO.
+     * @throws MojoExecutionException
+     */
+    private Set<Artifact> getNativeLibraryArtifacts() throws MojoExecutionException
+    {
+        return getNativeHelper().getNativeDependenciesArtifacts( this, getUnpackedLibsDirectory(), true );
+    }
+
+    /**
+     * Create the ${project.build.outputDirectory}/libs directory.
+     *
+     * @return File reference to the native libraries output directory.
+     */
+    private File makeNativeLibrariesOutputDirectory()
+    {
+        final File destinationDirectory = new File( nativeLibrariesOutputDirectory.getAbsolutePath() );
+        destinationDirectory.mkdirs();
+        return destinationDirectory;
+    }
+
+    private void copyNativeLibraryArtifactFileToDirectory( Artifact artifact, File destinationDirectory,
+                                                           String ndkArchitecture ) throws MojoExecutionException
+    {
+        final File artifactFile = artifact.getFile();
+        try
+        {
+            final String artifactId = artifact.getArtifactId();
+            String filename = artifactId.startsWith( "lib" )
+                    ? artifactId + ".so"
+                    : "lib" + artifactId + ".so";
+            if ( ndkFinalLibraryName != null
+                    && artifact.getFile().getName().startsWith( "lib" + ndkFinalLibraryName ) )
+            {
+                // The artifact looks like one we built with the NDK in this module
+                // preserve the name from the NDK build
+                filename = artifact.getFile().getName();
+            }
+
+            final File finalDestinationDirectory = getFinalDestinationDirectoryFor( artifact,
+                    destinationDirectory, ndkArchitecture );
+            final File file = new File( finalDestinationDirectory, filename );
+            getLog().debug(
+                    "Copying native dependency " + artifactId + " (" + artifact.getGroupId()
+                            +
+                            ") to " + file );
+            FileUtils.copyFile( artifactFile, file );
+        }
+        catch ( Exception e )
+        {
+            throw new MojoExecutionException( "Could not copy native dependency.", e );
+        }
+    }
+
 
     private void optionallyCopyGdbServer( File destinationDirectory, String architecture ) throws MojoExecutionException
     {
@@ -987,31 +952,6 @@ public class ApkMojo extends AbstractAndroidMojo
         executor.setLogger( this.getLog() );
         File[] overlayDirectories = getResourceOverlayDirectories();
 
-        if ( extractedDependenciesRes.exists() )
-        {
-            copyDependenciesRes();
-        }
-        if ( resourceDirectory.exists() && combinedRes.exists() )
-        {
-            copyLocalResourceFiles();
-        }
-
-        // Must combine assets.
-        // The aapt tools does not support several -A arguments.
-        // We copy the assets from extracted dependencies first, and then the local assets.
-        // This allows redefining the assets in the current project
-        if ( extractedDependenciesAssets.exists() )
-        {
-            copyDependencyAssets();
-        }
-
-        processApkLibAssets();
-
-        if ( assetsDirectory.exists() )
-        {
-            copyLocalAssets();
-        }
-
         File androidJar = getAndroidSdk().getAndroidJar();
         File outputFile = new File( project.getBuild().getDirectory(), project.getBuild().getFinalName() + ".ap_" );
 
@@ -1028,37 +968,26 @@ public class ApkMojo extends AbstractAndroidMojo
                 commands.add( resOverlayDir.getAbsolutePath() );
             }
         }
-        if ( combinedRes.exists() )
+        if ( resourceDirectory.exists() )
         {
             commands.add( "-S" );
-            commands.add( combinedRes.getAbsolutePath() );
+            commands.add( resourceDirectory.getAbsolutePath() );
         }
-        else
+        for ( Artifact libraryArtifact : getTransitiveDependencyArtifacts( APKLIB, AAR ) )
         {
-            if ( resourceDirectory.exists() )
+            final File libraryResDir = getUnpackedLibResourceFolder( libraryArtifact );
+            if ( libraryResDir.exists() )
             {
                 commands.add( "-S" );
-                commands.add( resourceDirectory.getAbsolutePath() );
-            }
-        }
-        for ( Artifact artifact : getAllRelevantDependencyArtifacts() )
-        {
-            if ( artifact.getType().equals( APKLIB ) )
-            {
-                final String apkLibResDir = getLibraryUnpackDirectory( artifact ) + "/res";
-                if ( new File( apkLibResDir ).exists() )
-                {
-                    commands.add( "-S" );
-                    commands.add( apkLibResDir );
-                }
+                commands.add( libraryResDir.getAbsolutePath() );
             }
         }
         commands.add( "--auto-add-overlay" );
 
-        // Use the combined assets.
-        // Indeed, aapt does not support several -A arguments.
+        // NB aapt only accepts a single assets parameter - combinedAssets is a merge of all assets
         if ( combinedAssets.exists() )
         {
+            getLog().debug( "Adding assets folder : " + combinedAssets );
             commands.add( "-A" );
             commands.add( combinedAssets.getAbsolutePath() );
         }
@@ -1092,15 +1021,15 @@ public class ApkMojo extends AbstractAndroidMojo
 
         if ( !release )
         {
-            getLog().info( "Enabling debug build for apk." );
+            getLog().info( "Generating debug apk." );
             commands.add( "--debug-mode" );
         }
         else 
         {
-            getLog().info( "Enabling release build for apk." );
+            getLog().info( "Generating release apk." );
         }
 
-        getLog().info( getAndroidSdk().getAaptPath() + " " + commands.toString() );
+        getLog().debug( getAndroidSdk().getAaptPath() + " " + commands.toString() );
         try
         {
             executor.executeCommand( getAndroidSdk().getAaptPath(), commands, project.getBasedir(), false );
@@ -1111,190 +1040,51 @@ public class ApkMojo extends AbstractAndroidMojo
         }
     }
 
-    private void copyDependenciesRes() throws MojoExecutionException
-    {
-        try
-        {
-            getLog().info( "Copying dependency resource files to combined resource directory." );
-            if ( ! combinedRes.exists() )
-            {
-                if ( ! combinedRes.mkdirs() )
-                {
-                    throw new MojoExecutionException(
-                            "Could not create directory for combined resources at "
-                                    + combinedRes.getAbsolutePath() );
-                }
-            }
-            FileUtils.copyDirectory( extractedDependenciesRes, combinedRes );
-        }
-        catch ( IOException e )
-        {
-            throw new MojoExecutionException( "", e );
-        }
-    }
-
-    private void copyLocalResourceFiles() throws MojoExecutionException
-    {
-        try
-        {
-            getLog().info( "Copying local resource files to combined resource directory." );
-            org.apache.commons.io.FileUtils.copyDirectory( resourceDirectory, combinedRes, new FileFilter()
-            {
-
-                /**
-                 * Excludes files matching one of the common file to exclude.
-                 * The default excludes pattern are the ones from
-                 * {org.codehaus.plexus.util.AbstractScanner#DEFAULTEXCLUDES}
-                 * @see java.io.FileFilter#accept(java.io.File)
-                 */
-                public boolean accept( File file )
-                {
-                    for ( String pattern : DirectoryScanner.DEFAULTEXCLUDES )
-                    {
-                        if ( DirectoryScanner.match( pattern, file.getAbsolutePath() ) )
-                        {
-                            getLog().debug(
-                                    "Excluding " + file.getName() + " from resource copy : matching " + pattern );
-                            return false;
-                        }
-                    }
-                    return true;
-                }
-            } );
-        }
-        catch ( IOException e )
-        {
-            throw new MojoExecutionException( "", e );
-        }
-    }
-
-    private void copyDependencyAssets() throws MojoExecutionException
-    {
-        try
-        {
-            getLog().info( "Copying dependency assets files to combined assets directory." );
-            FileUtils.copyDirectory( extractedDependenciesAssets, combinedAssets, new FileFilter()
-            {
-                /**
-                 * Excludes files matching one of the common file to exclude.
-                 * The default excludes pattern are the ones from
-                 * {org.codehaus.plexus.util.AbstractScanner#DEFAULTEXCLUDES}
-                 * @see java.io.FileFilter#accept(java.io.File)
-                 */
-                public boolean accept( File file )
-                {
-                    for ( String pattern : AbstractScanner.DEFAULTEXCLUDES )
-                    {
-                        if ( AbstractScanner.match( pattern, file.getAbsolutePath() ) )
-                        {
-                            getLog().debug(
-                                    "Excluding " + file.getName() + " from asset copy : matching " + pattern );
-                            return false;
-                        }
-                    }
-
-                    return true;
-
-                }
-            } );
-        }
-        catch ( IOException e )
-        {
-            throw new MojoExecutionException( "", e );
-        }
-    }
-
-    private void copyLocalAssets() throws MojoExecutionException
-    {
-        try
-        {
-            getLog().info( "Copying local assets files to combined assets directory." );
-            org.apache.commons.io.FileUtils.copyDirectory( assetsDirectory, combinedAssets, new FileFilter()
-            {
-                /**
-                 * Excludes files matching one of the common file to exclude.
-                 * The default excludes pattern are the ones from
-                 * {org.codehaus.plexus.util.AbstractScanner#DEFAULTEXCLUDES}
-                 * @see java.io.FileFilter#accept(java.io.File)
-                 */
-                public boolean accept( File file )
-                {
-                    for ( String pattern : AbstractScanner.DEFAULTEXCLUDES )
-                    {
-                        if ( AbstractScanner.match( pattern, file.getAbsolutePath() ) )
-                        {
-                            getLog().debug(
-                                    "Excluding " + file.getName() + " from asset copy : matching " + pattern );
-                            return false;
-                        }
-                    }
-
-                    return true;
-
-                }
-            } );
-        }
-        catch ( IOException e )
-        {
-            throw new MojoExecutionException( "", e );
-        }
-    }
-
     private void processApkLibAssets() throws MojoExecutionException
     {
         // Next pull APK Lib assets, reverse the order to give precedence to libs higher up the chain
-        List<Artifact> artifactList = new ArrayList<Artifact>( getAllRelevantDependencyArtifacts() );
+        List<Artifact> artifactList = new ArrayList<Artifact>( getTransitiveDependencyArtifacts( APKLIB, AAR ) );
         for ( Artifact artifact : artifactList )
         {
-            if ( artifact.getType().equals( APKLIB ) )
+            final File apklibAsssetsDirectory = getUnpackedLibAssetsFolder( artifact );
+            if ( apklibAsssetsDirectory.exists() )
             {
-                File apklibAsssetsDirectory = new File( getLibraryUnpackDirectory( artifact ) + "/assets" );
-                if ( apklibAsssetsDirectory.exists() )
+                try
                 {
-                    try
-                    {
-                        getLog().info( "Copying dependency assets files to combined assets directory." );
-                        org.apache.commons.io.FileUtils
-                                .copyDirectory( apklibAsssetsDirectory, combinedAssets, new FileFilter()
+                    getLog().info( "Copying dependency assets files to combined assets directory." );
+                    org.apache.commons.io.FileUtils
+                            .copyDirectory( apklibAsssetsDirectory, combinedAssets, new FileFilter() {
+                                /**
+                                 * Excludes files matching one of the common file to exclude.
+                                 * The default excludes pattern are the ones from
+                                 * {org.codehaus.plexus.util.AbstractScanner#DEFAULTEXCLUDES}
+                                 * @see java.io.FileFilter#accept(java.io.File)
+                                 */
+                                public boolean accept( File file )
                                 {
-                                    /**
-                                     * Excludes files matching one of the common file to exclude.
-                                     * The default excludes pattern are the ones from
-                                     * {org.codehaus.plexus.util.AbstractScanner#DEFAULTEXCLUDES}
-                                     * @see java.io.FileFilter#accept(java.io.File)
-                                     */
-                                    public boolean accept( File file )
+                                    for ( String pattern : AbstractScanner.DEFAULTEXCLUDES )
                                     {
-                                        for ( String pattern : AbstractScanner.DEFAULTEXCLUDES )
+                                        if ( AbstractScanner.match( pattern, file.getAbsolutePath() ) )
                                         {
-                                            if ( AbstractScanner.match( pattern, file.getAbsolutePath() ) )
-                                            {
-                                                getLog().debug( "Excluding " + file.getName() + " from asset copy : "
-                                                        + "matching " + pattern );
-                                                return false;
-                                            }
+                                            getLog().debug( "Excluding " + file.getName() + " from asset copy : "
+                                                    + "matching " + pattern );
+                                            return false;
                                         }
-
-                                        return true;
-
                                     }
-                                } );
-                    }
-                    catch ( IOException e )
-                    {
-                        throw new MojoExecutionException( "", e );
-                    }
 
+                                    return true;
+                                }
+                            } );
+                }
+                catch ( IOException e )
+                {
+                    throw new MojoExecutionException( "", e );
                 }
             }
         }
     }
 
 
-    /**
-     *
-     * @return
-     */
     protected AndroidSigner getAndroidSigner()
     {
         if ( sign == null )
@@ -1307,12 +1097,14 @@ public class ApkMojo extends AbstractAndroidMojo
         }
     }
 
-    /**
-     *
-     * @return
-     */
-    private String[] getDefaultMetaIncludes()
+    private MetaInf getDefaultMetaInf()
     {
-        return new String[ 0 ];
+        // check for deprecated first
+        if ( apkMetaIncludes != null && apkMetaIncludes.length > 0 )
+        {
+            return new MetaInf().include( apkMetaIncludes );
+        }
+
+        return this.pluginMetaInf;
     }
 }

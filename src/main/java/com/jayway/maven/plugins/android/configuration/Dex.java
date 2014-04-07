@@ -33,6 +33,17 @@ public class Dex
      * Mirror of {@link com.jayway.maven.plugins.android.phase08preparepackage.DexMojo#dexPreDexLibLocation}
      */
     private String preDexLibLocation;
+    /**
+     * Mirror of {@link com.jayway.maven.plugins.android.phase08preparepackage.DexMojo#dexIncremental}
+     */
+    private Boolean incremental;
+    /**
+     * Mirror of {@link com.jayway.maven.plugins.android.phase08preparepackage.DexMojo#forceJumbo}
+     */
+    private Boolean forceJumbo;
+
+
+
 
     public String[] getJvmArguments()
     {
@@ -62,5 +73,15 @@ public class Dex
     public String getPreDexLibLocation()
     {
       return preDexLibLocation;
+    }
+
+    public Boolean isIncremental()
+    {
+        return incremental;
+    }
+
+    public Boolean isForceJumbo()
+    {
+        return forceJumbo;
     }
 }

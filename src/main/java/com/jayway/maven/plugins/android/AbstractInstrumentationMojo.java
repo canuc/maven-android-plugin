@@ -97,6 +97,15 @@ public abstract class AbstractInstrumentationMojo extends AbstractAndroidMojo
      */
     private boolean mavenIgnoreTestFailure;
 
+    /**
+     * -Dmaven.test.error.ignore is commonly used with Maven to ignore test errors. We honor it too.
+     * Ignore or not tests errors. If <code>true</code> they will be ignored; if
+     * <code>false</code>, they will not. Default value is <code>false</code>.
+     *
+     * @parameter expression="${maven.test.error.ignore}" default-value=false required=false
+     * @readonly
+     */
+    private boolean mavenIgnoreTestError;
 
     /**
      * The configuration to use for running instrumentation tests. Complete configuration
@@ -118,6 +127,9 @@ public abstract class AbstractInstrumentationMojo extends AbstractAndroidMojo
      *   &lt;packages&gt;
      *     &lt;package&gt;your.package.name&lt;/package&gt;
      *   &lt;/packages&gt;
+     *   &lt;instrumentationArgs&gt;
+     *     &lt;instrumentationArg&gt;key value&lt;/instrumentationArg&gt;
+     *   &lt;/instrumentationArgs&gt;
      * &lt;/test&gt;
      * </pre>
      *
@@ -283,6 +295,21 @@ public abstract class AbstractInstrumentationMojo extends AbstractAndroidMojo
      */
     protected List<String> testExcludeAnnotations;
 
+    /**
+     * <p>Extra instrumentation arguments.</p>
+     * <pre>
+     * &lt;instrumentationArgs&gt;
+     *     &lt;instrumentationArg&gt;key value&lt;/instrumentationArg&gt;
+     *     &lt;instrumentationArg&gt;key 'value with spaces'&lt;/instrumentationArg&gt;
+     * &lt;/instrumentationArgs&gt;
+     * </pre>
+     * or as e.g. -Dandroid.test.instrumentationArgs="key1 value1","key2 'value with spaces'"
+     *
+     * @optional
+     * @parameter expression="${android.test.instrumentationArgs}"
+     */
+    protected List<String> testInstrumentationArgs;
+
     private boolean classesExists;
     private boolean packagesExists;
 
@@ -294,6 +321,7 @@ public abstract class AbstractInstrumentationMojo extends AbstractAndroidMojo
     private List<String> parsedPackages;
     private List<String> parsedAnnotations;
     private List<String> parsedExcludeAnnotations;
+    private Map<String, String> parsedInstrumentationArgs;
     private String parsedTestSize;
     private Boolean parsedCoverage;
     private String parsedCoverageFile;
@@ -396,6 +424,8 @@ public abstract class AbstractInstrumentationMojo extends AbstractAndroidMojo
                     remoteAndroidTestRunner.setTestSize( validSize );
                 }
 
+                addAllInstrumentationArgs( remoteAndroidTestRunner, parsedInstrumentationArgs );
+
                 getLog().info( deviceLogLinePrefix +  "Running instrumentation tests in " 
                         + parsedInstrumentationPackage );
                 try
@@ -438,6 +468,16 @@ public abstract class AbstractInstrumentationMojo extends AbstractAndroidMojo
         instrumentationTestExecutor = new ScreenshotServiceWrapper( instrumentationTestExecutor, project, getLog() );
 
         doWithDevices( instrumentationTestExecutor );
+    }
+
+    private void addAllInstrumentationArgs(
+            final RemoteAndroidTestRunner remoteAndroidTestRunner,
+            final Map<String, String> parsedInstrumentationArgs )
+    {
+        for ( final Map.Entry<String, String> entry : parsedInstrumentationArgs.entrySet() )
+        {
+            remoteAndroidTestRunner.addInstrumentationArg( entry.getKey(), entry.getValue() );
+        }
     }
 
     private void parseConfiguration()
@@ -549,6 +589,8 @@ public abstract class AbstractInstrumentationMojo extends AbstractAndroidMojo
             {
                 parsedCreateReport = testCreateReport;
             }
+
+            parsedInstrumentationArgs = InstrumentationArgumentParser.parse( test.getInstrumentationArgs() );
         }
         // no pom, we take properties
         else
@@ -566,6 +608,7 @@ public abstract class AbstractInstrumentationMojo extends AbstractAndroidMojo
             parsedDebug = testDebug;
             parsedLogOnly = testLogOnly;
             parsedCreateReport = testCreateReport;
+            parsedInstrumentationArgs = InstrumentationArgumentParser.parse( testInstrumentationArgs );
         }
     }
 
@@ -1086,10 +1129,21 @@ public abstract class AbstractInstrumentationMojo extends AbstractAndroidMojo
          */
         public boolean hasFailuresOrErrors()
         {
+            if ( mavenIgnoreTestFailure && mavenIgnoreTestError )
+            {
+                return false;
+            }
+
             if ( mavenIgnoreTestFailure )
             {
                 return testErrorCount > 0;
             }
+
+            if ( mavenIgnoreTestError )
+            {
+                return testFailureCount > 0;
+            }
+
             return testErrorCount > 0 || testFailureCount > 0;
         }
 

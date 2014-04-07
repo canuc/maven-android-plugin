@@ -1,5 +1,7 @@
 package com.jayway.maven.plugins.android.configuration;
 
+import java.io.File;
+
 /**
  * Configuration container for proguard without default values.
  *
@@ -10,6 +12,7 @@ package com.jayway.maven.plugins.android.configuration;
  */
 public class Proguard
 {
+
     /**
      * Whether ProGuard is enabled or not.
      */
@@ -17,21 +20,23 @@ public class Proguard
     /**
      * Path to the ProGuard configuration file (relative to project root).
      */
-    private String config;
+    private File config;
     private String[] configs;
     private String proguardJarPath;
-    private String outputDirectory;
+    private File outputDirectory;
     private String[] jvmArguments;
     private Boolean filterMavenDescriptor;
     private Boolean filterManifest;
     private Boolean includeJdkLibs;
+    private String[] options;
+    private Boolean attachMap;
 
     public Boolean isSkip()
     {
         return skip;
     }
 
-    public String getConfig()
+    public File getConfig()
     {
         return config;
     }
@@ -46,7 +51,7 @@ public class Proguard
         return proguardJarPath;
     }
     
-    public String getOutputDirectory()
+    public File getOutputDirectory()
     {
         return outputDirectory;
     }
@@ -69,5 +74,10 @@ public class Proguard
     public Boolean isIncludeJdkLibs()
     {
         return includeJdkLibs;
+    }
+
+    public String[] getOptions()
+    {
+        return options;
     }
 }

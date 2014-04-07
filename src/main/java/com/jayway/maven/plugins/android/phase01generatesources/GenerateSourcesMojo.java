@@ -22,9 +22,10 @@ import com.android.utils.StdLogger;
 import com.jayway.maven.plugins.android.AbstractAndroidMojo;
 import com.jayway.maven.plugins.android.CommandExecutor;
 import com.jayway.maven.plugins.android.ExecutionException;
-import com.jayway.maven.plugins.android.common.AetherHelper;
-
+import com.jayway.maven.plugins.android.common.ZipExtractor;
+import com.jayway.maven.plugins.android.configuration.BuildConfigConstant;
 import org.apache.commons.io.FileUtils;
+import org.apache.commons.io.IOUtils;
 import org.apache.commons.lang.StringUtils;
 import org.apache.maven.artifact.Artifact;
 import org.apache.maven.plugin.MojoExecutionException;
@@ -34,19 +35,30 @@ import org.codehaus.plexus.archiver.UnArchiver;
 import org.codehaus.plexus.archiver.zip.ZipUnArchiver;
 import org.codehaus.plexus.logging.Logger;
 import org.codehaus.plexus.logging.console.ConsoleLogger;
-import org.codehaus.plexus.util.AbstractScanner;
+import org.w3c.dom.Document;
 
+import javax.xml.parsers.DocumentBuilder;
+import javax.xml.parsers.DocumentBuilderFactory;
+import javax.xml.transform.OutputKeys;
+import javax.xml.transform.Result;
+import javax.xml.transform.Source;
+import javax.xml.transform.Transformer;
+import javax.xml.transform.TransformerFactory;
+import javax.xml.transform.dom.DOMSource;
+import javax.xml.transform.stream.StreamResult;
 import java.io.File;
-import java.io.FileFilter;
+import java.io.FileWriter;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import static com.jayway.maven.plugins.android.common.AndroidExtension.AAR;
 import static com.jayway.maven.plugins.android.common.AndroidExtension.APK;
 import static com.jayway.maven.plugins.android.common.AndroidExtension.APKLIB;
 import static com.jayway.maven.plugins.android.common.AndroidExtension.APKSOURCES;
@@ -57,6 +69,8 @@ import static com.jayway.maven.plugins.android.common.AndroidExtension.APKSOURCE
  *
  * @author hugo.josefson@jayway.com
  * @author Manfred Moser <manfred@simpligility.com>
+ * @author William Ferguson <william.ferguson@xandar.com.au>
+ * @author Malachi de AElfweald malachid@gmail.com
  *
  * @goal generate-sources
  * @phase generate-sources
@@ -161,7 +175,21 @@ public class GenerateSourcesMojo extends AbstractAndroidMojo
      * default-value="${project.build.directory}/generated-sources/aidl"
      */
     protected File genDirectoryAidl;
-    
+
+    /**
+     * <p>Parameter designed to generate custom BuildConfig constants
+     *
+     * @parameter expression="${android.buildConfigConstants}"
+     * @readonly
+     */
+    protected BuildConfigConstant[] buildConfigConstants;
+
+    /**
+     * Generates the source.
+     *
+     * @throws MojoExecutionException if it fails.
+     * @throws MojoFailureException if it fails.
+     */
     public void execute() throws MojoExecutionException, MojoFailureException
     {
 
@@ -174,26 +202,30 @@ public class GenerateSourcesMojo extends AbstractAndroidMojo
 
         try
         {
+            targetDirectory.mkdirs();
+            copyManifest();
+            // TODO Do we really want to continue supporting APKSOURCES? How long has it been deprecated
             extractSourceDependencies();
-            extractApkLibDependencies();
+
+            // Extract the apklib and aar dependencies into unpacked-libs so that they can be referenced in the build.
+            extractLibraryDependencies();
+
+            // Copy project assets to combinedAssets so that aapt has a single assets folder to load.
+            copyFolder( assetsDirectory, combinedAssets );
 
             final String[] relativeAidlFileNames1 = findRelativeAidlFileNames( sourceDirectory );
             final String[] relativeAidlFileNames2 = findRelativeAidlFileNames( extractedDependenciesJavaSources );
             final Map<String, String[]> relativeApklibAidlFileNames = new HashMap<String, String[]>();
-            String[] apklibAidlFiles;
-            for ( Artifact artifact : getAllRelevantDependencyArtifacts() )
+
+            for ( Artifact artifact : getTransitiveDependencyArtifacts( APKLIB ) )
             {
-                if ( artifact.getType().equals( APKLIB ) )
-                {
-                    apklibAidlFiles = findRelativeAidlFileNames(
-                            new File( getLibraryUnpackDirectory( artifact ) + "/src" ) );
-                    relativeApklibAidlFileNames.put( artifact.getId(), apklibAidlFiles );
-                }
+                final File libSourceFolder = getUnpackedApkLibSourceFolder( artifact );
+                final String[] apklibAidlFiles = findRelativeAidlFileNames( libSourceFolder );
+                relativeApklibAidlFileNames.put( artifact.getId(), apklibAidlFiles );
             }
 
             mergeManifests();
             generateR();
-            generateApklibR();
             generateBuildConfig();
 
             // When compiling AIDL for this project,
@@ -203,13 +235,10 @@ public class GenerateSourcesMojo extends AbstractAndroidMojo
             Map<File, String[]> files = new HashMap<File, String[]>();
             files.put( sourceDirectory, relativeAidlFileNames1 );
             files.put( extractedDependenciesJavaSources, relativeAidlFileNames2 );
-            for ( Artifact artifact : getAllRelevantDependencyArtifacts() )
+            for ( Artifact artifact : getTransitiveDependencyArtifacts( APKLIB ) )
             {
-                if ( artifact.getType().equals( APKLIB ) )
-                {
-                    files.put( new File( getLibraryUnpackDirectory( artifact ) + "/src" ),
-                            relativeApklibAidlFileNames.get( artifact.getId() ) );
-                }
+                final File unpackedLibSourceFolder = getUnpackedApkLibSourceFolder( artifact );
+                files.put( unpackedLibSourceFolder, relativeApklibAidlFileNames.get( artifact.getId() ) );
             }
             generateAidlFiles( files );
         }
@@ -220,9 +249,68 @@ public class GenerateSourcesMojo extends AbstractAndroidMojo
         }
     }
 
+    /**
+     * Copy the AndroidManifest.xml from sourceManifestFile to androidManifestFile
+     *
+     * @throws MojoExecutionException
+     */
+    protected void copyManifest() throws MojoExecutionException
+    {
+        getLog().debug( "copyManifest: " + sourceManifestFile + " -> " + androidManifestFile );
+        if ( sourceManifestFile == null )
+        {
+            getLog().info( "Manifest copying disabled. Using default manifest only" );
+            return;
+        }
+
+        try
+        {
+            DocumentBuilderFactory dbf = DocumentBuilderFactory.newInstance();
+            DocumentBuilder db = dbf.newDocumentBuilder();
+            Document doc = db.parse( sourceManifestFile );
+            Source source = new DOMSource( doc );
+
+            TransformerFactory xfactory = TransformerFactory.newInstance();
+            Transformer xformer = xfactory.newTransformer();
+            xformer.setOutputProperty( OutputKeys.OMIT_XML_DECLARATION, "yes" );
+
+            FileWriter writer = null;
+            try
+            {
+                androidManifestFile.getParentFile().mkdirs();
+
+                writer = new FileWriter( androidManifestFile, false );
+                if ( doc.getXmlEncoding() != null && doc.getXmlVersion() != null )
+                {
+                    String xmldecl = String.format( "<?xml version=\"%s\" encoding=\"%s\"?>%n",
+                            doc.getXmlVersion(), doc.getXmlEncoding() );
+
+                    writer.write( xmldecl );
+                }
+                Result result = new StreamResult( writer );
+                xformer.transform( source, result );
+                getLog().info( "Manifest copied from " + sourceManifestFile + " to " + androidManifestFile );
+            }
+            finally
+            {
+                IOUtils.closeQuietly( writer );
+            }
+        }
+        catch ( Exception e )
+        {
+            getLog().error( "Error during copyManifest" );
+            throw new MojoExecutionException( "Error during copyManifest", e );
+        }
+    }
+
+    /**
+     * Extract the source dependencies.
+     *
+     * @throws MojoExecutionException if it fails.
+     */
     protected void extractSourceDependencies() throws MojoExecutionException
     {
-        for ( Artifact artifact : getRelevantDependencyArtifacts() )
+        for ( Artifact artifact : getDirectDependencyArtifacts() )
         {
             String type = artifact.getType();
             if ( type.equals( APKSOURCES ) )
@@ -230,32 +318,17 @@ public class GenerateSourcesMojo extends AbstractAndroidMojo
                 getLog().debug( "Detected apksources dependency " + artifact + " with file " + artifact.getFile()
                         + ". Will resolve and extract..." );
 
-                Artifact resolvedArtifact = AetherHelper
-                        .resolveArtifact( artifact, repoSystem, repoSession, projectRepos );
-
-                File apksourcesFile = resolvedArtifact.getFile();
-
-                // When the artifact is not installed in local repository, but rather part of the current reactor,
-                // resolve from within the reactor. (i.e. ../someothermodule/target/*)
-                if ( ! apksourcesFile.exists() )
-                {
-                    apksourcesFile = resolveArtifactToFile( artifact );
-                }
-
-                // When using maven under eclipse the artifact will by default point to a directory, which isn't
-                // correct. To work around this we'll first try to get the archive from the local repo, and only if it
-                // isn't found there we'll do a normal resolve.
-
-                if ( apksourcesFile.isDirectory() )
-                {
-                    apksourcesFile = resolveArtifactToFile( artifact );
-                }
+                final File apksourcesFile = resolveArtifactToFile( artifact );
                 getLog().debug( "Extracting " + apksourcesFile + "..." );
                 extractApksources( apksourcesFile );
             }
         }
-        projectHelper.addResource( project, extractedDependenciesJavaResources.getAbsolutePath(), null, null );
-        project.addCompileSourceRoot( extractedDependenciesJavaSources.getAbsolutePath() );
+
+        if ( extractedDependenciesJavaResources.exists() )
+        {
+            projectHelper.addResource( project, extractedDependenciesJavaResources.getAbsolutePath(), null, null );
+            project.addCompileSourceRoot( extractedDependenciesJavaSources.getAbsolutePath() );
+        }
     }
 
     private void extractApksources( File apksourcesFile ) throws MojoExecutionException
@@ -287,176 +360,368 @@ public class GenerateSourcesMojo extends AbstractAndroidMojo
         }
     }
 
-    private void extractApkLibDependencies() throws MojoExecutionException
+    private void extractLibraryDependencies() throws MojoExecutionException
     {
-        for ( Artifact artifact : getAllRelevantDependencyArtifacts() )
+        final Collection<Artifact> artifacts = getTransitiveDependencyArtifacts();
+        getLog().info( "Extracting libs" );
+
+        for ( Artifact artifact : artifacts )
         {
-            String type = artifact.getType();
+            final String type = artifact.getType();
             if ( type.equals( APKLIB ) )
             {
-                getLog().debug( "Extracting apklib " + artifact.getArtifactId() + "..." );
+                getLog().info( "Extracting apklib " + artifact.getArtifactId() + "..." );
                 extractApklib( artifact );
             }
+            else if ( type.equals( AAR ) )
+            {
+                getLog().info( "Extracting aar " + artifact.getArtifactId() + "..." );
+                extractAarLib( artifact );
+            }
+            else if ( type.equals( APK ) )
+            {
+                getLog().info( "Extracting apk " + artifact.getArtifactId() + "..." );
+                extractApkClassesJar( artifact );
+            }
+            else
+            {
+                getLog().debug( "Not extracting " + artifact.getArtifactId() + "..." );
+            }
         }
     }
 
+    /**
+     * Extracts ApkLib and adds the assets and apklib sources and resources to the build.
+     */
     private void extractApklib( Artifact apklibArtifact ) throws MojoExecutionException
     {
+        getUnpackedLibHelper().extractApklib( apklibArtifact );
 
-        final Artifact resolvedArtifact = AetherHelper
-                .resolveArtifact( apklibArtifact, repoSystem, repoSession, projectRepos );
+        // Copy the assets to the the combinedAssets folder.
+        // Add the apklib source and resource to the compile.
+        // NB apklib sources are added to compileSourceRoot because we may need to compile against them.
+        //    This means the apklib classes will be compiled into target/classes and packaged with this build.
+        copyFolder( getUnpackedLibAssetsFolder( apklibArtifact ), combinedAssets );
 
-        File apkLibFile = resolvedArtifact.getFile();
-
-        // When the artifact is not installed in local repository, but rather part of the current reactor,
-        // resolve from within the reactor. (i.e. ../someothermodule/target/*)
-        if ( ! apkLibFile.exists() )
-        {
-            apkLibFile = resolveArtifactToFile( apklibArtifact );
-        }
-
-        //When using maven under eclipse the artifact will by default point to a directory, which isn't correct.
-        //To work around this we'll first try to get the archive from the local repo, and only if it isn't found there
-        // we'll do a normal resolve.
-        if ( apkLibFile.isDirectory() )
-        {
-            apkLibFile = resolveArtifactToFile( apklibArtifact );
-        }
-
-        if ( apkLibFile.isDirectory() )
-        {
-            getLog().warn(
-                    "The apklib artifact points to '" + apkLibFile + "' which is a directory; skipping unpacking it." );
-            return;
-        }
-
-        final UnArchiver unArchiver = new ZipUnArchiver( apkLibFile )
-        {
-            @Override
-            protected Logger getLogger()
-            {
-                return new ConsoleLogger( Logger.LEVEL_DEBUG, "dependencies-unarchiver" );
-            }
-        };
-        File apklibDirectory = new File( getLibraryUnpackDirectory( apklibArtifact ) );
-        apklibDirectory.mkdirs();
-        unArchiver.setDestDirectory( apklibDirectory );
-        try
-        {
-            unArchiver.extract();
-        }
-        catch ( ArchiverException e )
-        {
-            throw new MojoExecutionException( "ArchiverException while extracting " + apklibDirectory.getAbsolutePath()
-                    + ". Message: " + e.getLocalizedMessage(), e );
-        }
-
-        projectHelper.addResource( project, apklibDirectory.getAbsolutePath() + "/src", null,
-                Arrays.asList( "**/*.java", "**/*.aidl" ) );
-        project.addCompileSourceRoot( apklibDirectory.getAbsolutePath() + "/src" );
-
+        final File apklibSourceFolder = getUnpackedApkLibSourceFolder( apklibArtifact );
+        final List<String> resourceExclusions = Arrays.asList( "**/*.java", "**/*.aidl" );
+        projectHelper.addResource( project, apklibSourceFolder.getAbsolutePath(), null, resourceExclusions );
+        project.addCompileSourceRoot( apklibSourceFolder.getAbsolutePath() );
     }
 
+    /**
+     * Extracts AarLib and if this is an APK build then adds the assets and resources to the build.
+     */
+    private void extractAarLib( Artifact aarArtifact ) throws MojoExecutionException
+    {
+        getUnpackedLibHelper().extractAarLib( aarArtifact );
+
+        // Copy the assets to the the combinedAssets folder, but only if an APK build.
+        // Ie we only want to package assets that we own.
+        // Assets should only live within their owners or the final APK.
+        if ( isAPKBuild() )
+        {
+            copyFolder( getUnpackedLibAssetsFolder( aarArtifact ), combinedAssets );
+        }
+
+        // Aar lib resources should only be included if we are building an apk.
+        // So we need to extract them into a folder that we then add to the resource classpath.
+        if ( isAPKBuild() )
+        {
+            // Extract the resources from the AAR classes and add them as a resource path to the project.
+            final File aarClassesJar = getUnpackedAarClassesJar( aarArtifact );
+            final ZipExtractor extractor = new ZipExtractor( getLog() );
+            final File javaResourcesFolder = getUnpackedAarJavaResourcesFolder( aarArtifact );
+            extractor.extract( aarClassesJar, javaResourcesFolder, ".class" );
+            projectHelper.addResource( project, javaResourcesFolder.getAbsolutePath(), null, null );
+            getLog().debug( "Added AAR resources to resource classpath : " + javaResourcesFolder );
+        }
+    }
+
+    /**
+     * Copies a dependent APK jar over the top of the placeholder created for it in AarMavenLifeCycleParticipant.
+     *
+     * This is necessary because we need the classes of the APK added to the compile classpath.
+     * NB APK dependencies are uncommon as they should really only be used in a project that tests an apk.
+     *
+     * @param artifact  APK dependency for this project whose classes will be copied over.
+     */
+    private void extractApkClassesJar( Artifact artifact ) throws MojoExecutionException
+    {
+        final File apkClassesJar = getUnpackedLibHelper().getJarFileForApk( artifact );
+        final File unpackedClassesJar = getUnpackedLibHelper().getUnpackedClassesJar( artifact );
+        try
+        {
+            FileUtils.copyFile( apkClassesJar, unpackedClassesJar );
+        }
+        catch ( IOException e )
+        {
+            throw new MojoExecutionException(
+                    "Could not copy APK classes jar " + apkClassesJar + " to " + unpackedClassesJar, e );
+        }
+        getLog().debug( "Copied APK classes jar into compile classpath : " + unpackedClassesJar );
+
+    }
 
     private void generateR() throws MojoExecutionException
     {
-        getLog().debug( "Generating R file for " + project.getPackaging() );
+        getLog().info( "Generating R file for " + project.getArtifact() );
 
         genDirectory.mkdirs();
 
-        File[] overlayDirectories = getResourceOverlayDirectories();
+        final File[] overlayDirectories = getResourceOverlayDirectories();
+        getLog().debug( "Resource overlay folders : " + Arrays.asList( overlayDirectories ) );
 
-        if ( extractedDependenciesRes.exists() )
-        {
-            try
-            {
-                getLog().info( "Copying dependency resource files to combined resource directory." );
-                if ( ! combinedRes.exists() )
-                {
-                    if ( ! combinedRes.mkdirs() )
-                    {
-                        throw new MojoExecutionException(
-                                "Could not create directory for combined resources at " + combinedRes
-                                        .getAbsolutePath() );
-                    }
-                }
-                org.apache.commons.io.FileUtils.copyDirectory( extractedDependenciesRes, combinedRes );
-            }
-            catch ( IOException e )
-            {
-                throw new MojoExecutionException( "", e );
-            }
-        }
-        if ( resourceDirectory.exists() && combinedRes.exists() )
-        {
-            try
-            {
-                getLog().info( "Copying local resource files to combined resource directory." );
-
-                org.apache.commons.io.FileUtils.copyDirectory( resourceDirectory, combinedRes, new FileFilter()
-                {
-
-                    /**
-                     * Excludes files matching one of the common file to exclude.
-                     * The default excludes pattern are the ones from
-                     * {org.codehaus.plexus.util.AbstractScanner#DEFAULTEXCLUDES}
-                     * @see java.io.FileFilter#accept(java.io.File)
-                     */
-                    public boolean accept( File file )
-                    {
-                        for ( String pattern : AbstractScanner.DEFAULTEXCLUDES )
-                        {
-                            if ( AbstractScanner.match( pattern, file.getAbsolutePath() ) )
-                            {
-                                getLog().debug(
-                                        "Excluding " + file.getName() + " from resource copy : matching " + pattern );
-                                return false;
-                            }
-                        }
-                        return true;
-                    }
-                } );
-            }
-            catch ( IOException e )
-            {
-                throw new MojoExecutionException( "", e );
-            }
-        }
-
-
-        CommandExecutor executor = CommandExecutor.Factory.createDefaultCommmandExecutor();
+        final CommandExecutor executor = CommandExecutor.Factory.createDefaultCommmandExecutor();
         executor.setLogger( this.getLog() );
 
-        List<String> commands = new ArrayList<String>();
+        final List<String> commands = new ArrayList<String>();
         commands.add( "package" );
-        if ( APKLIB.equals( project.getArtifact().getType() ) )
+
+        commands.add( "-f" );
+        commands.add( "--no-crunch" );
+
+        // inputs
+        commands.add( "-I" );
+        commands.add( getAndroidSdk().getAndroidJar().getAbsolutePath() );
+
+        commands.add( "-M" );
+        commands.add( androidManifestFile.getAbsolutePath() );
+
+        // NB AndroidBuilder only adds a single folder - presumably it contains a merge of all resources.
+        for ( File resOverlayDir : overlayDirectories )
         {
-            commands.add( "--non-constant-id" );
+            if ( resOverlayDir != null && resOverlayDir.exists() )
+            {
+                getLog().debug( "Adding resource overlay folder : " + resOverlayDir );
+                commands.add( "-S" );
+                commands.add( resOverlayDir.getAbsolutePath() );
+            }
         }
+        if ( resourceDirectory.exists() )
+        {
+            getLog().debug( "Adding resource folder : " + resourceDirectory );
+            commands.add( "-S" );
+            commands.add( resourceDirectory.getAbsolutePath() );
+        }
+
+        // Need to include any AAR or APKLIB dependencies when generating R because if any local
+        // resources directly reference dependent resources then R generation will crash.
+        addLibraryResourceFolders( commands );
+
+        // NB aapt only accepts a single assets parameter - combinedAssets is a merge of all assets
+        if ( combinedAssets.exists() )
+        {
+            getLog().debug( "Adding assets folder : " + combinedAssets );
+            commands.add( "-A" );
+            commands.add( combinedAssets.getAbsolutePath() );
+        }
+
+        // outputs
         commands.add( "-m" );
         commands.add( "-J" );
         commands.add( genDirectory.getAbsolutePath() );
-        commands.add( "-M" );
-        commands.add( androidManifestFile.getAbsolutePath() );
+
+        // Write the output to an optional location
+        // Used by AndroidBuilder but not by us.
+        // final File optionalOutputLocation = some file;
+        // getLog().debug( "Using default package : " + optionalOutputLocation );
+        // commands.add( "-F" );
+        // commands.add( optionalOutputLocation.getAbsolutePath() );
+
+        // If a proguard file is defined then output Proguard options to it.
+        if ( proguardFile != null )
+        {
+            final File parentFolder = proguardFile.getParentFile();
+            if ( parentFolder != null )
+            {
+                parentFolder.mkdirs();
+            }
+            getLog().debug( "Adding proguard file : " + proguardFile );
+            commands.add( "-G" );
+            commands.add( proguardFile.getAbsolutePath() );
+        }
+
         if ( StringUtils.isNotBlank( customPackage ) )
         {
+            getLog().debug( "Adding custom-package : " + customPackage );
             commands.add( "--custom-package" );
             commands.add( customPackage );
         }
 
-        addResourcesDirectories( commands, overlayDirectories );
+        if ( AAR.equals( project.getArtifact().getType() ) )
+        {
+            getLog().debug( "Adding non-constant-id" );
+            commands.add( "--non-constant-id" );
+        }
+
+        for ( String aaptExtraArg : aaptExtraArgs )
+        {
+            getLog().debug( "Adding aapt arg : " + aaptExtraArg );
+            commands.add( aaptExtraArg );
+        }
+
+        if ( StringUtils.isNotBlank( configurations ) )
+        {
+            // Should be comma separated list of locales etc.
+            getLog().debug( "Adding resource configurations : " + configurations );
+            commands.add( "-c" );
+            commands.add( configurations );
+        }
+
+        // We need to generate R.txt for all projects as it needs to be consumed when generating R class.
+        // It also needs to be consumed when packaging aar.
+        commands.add( "--output-text-symbols" );
+        commands.add( targetDirectory.getAbsolutePath() );
+
+        // Allows us to supply multiple -S arguments.
+        commands.add( "--auto-add-overlay" );
+
+        getLog().debug( getAndroidSdk().getAaptPath() + " " + commands.toString() );
+        try
+        {
+            targetDirectory.mkdirs();
+            executor.executeCommand( getAndroidSdk().getAaptPath(), commands, project.getBasedir(), false );
+        }
+        catch ( ExecutionException e )
+        {
+            throw new MojoExecutionException( "", e );
+        }
+
+        // Generate R.java for apklibs
+        // Compatibility with Apklib which isn't present in AndroidBuilder
+        generateApkLibRs();
+
+        // Generate error corrected R.java for APKLIB dependencies, but only if this is an APK build.
+        final Set<Artifact> apklibDependencies = getTransitiveDependencyArtifacts( APKLIB );
+        if ( !apklibDependencies.isEmpty() && APK.equals( project.getArtifact().getType() ) )
+        {
+            // Generate R.java for each APKLIB based on R.txt
+            getLog().debug( "Generating R file for APKLIB dependencies" );
+            generateRJavaFromRTxt( apklibDependencies, "apklib" );
+        }
+
+        // Generate error corrected R.java for AAR dependencies.
+        final Set<Artifact> aarLibraries = getTransitiveDependencyArtifacts( AAR );
+        if ( !aarLibraries.isEmpty() )
+        {
+            // Generate R.java for each AAR based on R.txt
+            getLog().debug( "Generating R file for AAR dependencies" );
+            generateRJavaFromRTxt( aarLibraries, "aar" );
+        }
+
+        getLog().info( "Adding R gen folder to compile classpath: " + genDirectory );
+        project.addCompileSourceRoot( genDirectory.getAbsolutePath() );
+    }
+
+    private void generateRJavaFromRTxt( Set<Artifact> librariesToGenerateR, String type ) throws MojoExecutionException
+    {
+        new ResourceClassGenerator(
+                this, librariesToGenerateR, targetDirectory, genDirectory, getLog(), type
+        ).generateLibraryRs();
+    }
+
+    private void generateApkLibRs() throws MojoExecutionException
+    {
+        getLog().debug( "Generating Rs for apklib deps of project " + project.getArtifact() );
+        for ( final Artifact artifact : getTransitiveDependencyArtifacts( APKLIB ) )
+        {
+            getLog().debug( "Generating apklib R.java for " + artifact.getArtifactId() + "..." );
+            generateRForApkLibDependency( artifact );
+        }
+    }
+
+    private void addLibraryResourceFolders( List<String> commands )
+    {
+        for ( Artifact artifact : getTransitiveDependencyArtifacts() )
+        {
+            getLog().debug( "Considering dep artifact : " + artifact );
+            if ( artifact.getType().equals( APKLIB ) || artifact.getType().equals( AAR ) )
+            {
+                final File apklibResDirectory = getUnpackedLibResourceFolder( artifact );
+                if ( apklibResDirectory.exists() )
+                {
+                    getLog().debug( "Adding apklib or aar resource folder : " + apklibResDirectory );
+                    commands.add( "-S" );
+                    commands.add( apklibResDirectory.getAbsolutePath() );
+                }
+            }
+        }
+    }
+     /**
+     * Executes aapt to generate the R class for the given apklib.
+     *
+     * @param apklibArtifact    apklib for which to generate the R class.
+     * @throws MojoExecutionException if it fails.
+     */
+    private void generateRForApkLibDependency( Artifact apklibArtifact ) throws MojoExecutionException
+    {
+        final File unpackDir = getUnpackedLibFolder( apklibArtifact );
+        getLog().info( "Generating R file for apklibrary: " + apklibArtifact.getGroupId()
+                + ":" + apklibArtifact.getArtifactId() );
+        final File apklibManifest = new File( unpackDir, "AndroidManifest.xml" );
+        final File apklibResDir = new File( unpackDir, "res" );
+
+        final CommandExecutor executor = CommandExecutor.Factory.createDefaultCommmandExecutor();
+        executor.setLogger( getLog() );
+
+        List<String> commands = new ArrayList<String>();
+        commands.add( "package" );
+        commands.add( "--non-constant-id" );
+        commands.add( "-m" );
+        commands.add( "-J" );
+        commands.add( genDirectory.getAbsolutePath() );
+        commands.add( "--custom-package" );
+        commands.add( extractPackageNameFromAndroidManifest( apklibManifest ) );
+        commands.add( "-M" );
+        commands.add( apklibManifest.getAbsolutePath() );
+
+        if ( apklibResDir.exists() )
+        {
+            // Add the APKLIB resources first so they overlay any of it's dependencies.
+            commands.add( "-S" );
+            commands.add( apklibResDir.getAbsolutePath() );
+        }
+
+        final Set<Artifact> apklibDeps = getDependencyResolver().getLibraryDependenciesFor( project, apklibArtifact );
+        getLog().debug( "apklib dependencies = " + apklibDeps );
+        for ( Artifact dependency : apklibDeps )
+        {
+            // Add in the resources that are dependencies of the apklib.
+            final String extension = dependency.getType();
+            final File dependencyResDir = getUnpackedLibResourceFolder( dependency );
+            if ( ( extension.equals( APKLIB ) || extension.equals( AAR ) ) && dependencyResDir.exists() )
+            {
+                commands.add( "-S" );
+                commands.add( dependencyResDir.getAbsolutePath() );
+            }
+        }
 
         commands.add( "--auto-add-overlay" );
-        if ( assetsDirectory.exists() )
+
+        // Create combinedAssets for this apklib dependency - can't have multiple -A args
+        final File apklibCombAssets = new File( getUnpackedLibFolder( apklibArtifact ), "combined-assets" );
+        for ( Artifact dependency : apklibDeps )
+        {
+            // Accumulate assets for dependencies of the apklib (if they exist).
+            final String extension = dependency.getType();
+            final File dependencyAssetsDir = getUnpackedLibAssetsFolder( dependency );
+            if ( ( extension.equals( APKLIB ) || extension.equals( AAR ) ) )
+            {
+                copyFolder( dependencyAssetsDir, apklibCombAssets );
+            }
+        }
+        // Overlay the apklib dependency assets (if they exist)
+        final File apkLibAssetsDir = getUnpackedLibAssetsFolder( apklibArtifact );
+        copyFolder( apkLibAssetsDir, apklibCombAssets );
+
+        // If there are any combined assets for the apklib dependency then provide them to aapt.
+        if ( apklibCombAssets.exists() )
         {
             commands.add( "-A" );
-            commands.add( assetsDirectory.getAbsolutePath() );
+            commands.add( apklibCombAssets.getAbsolutePath() );
         }
-        if ( extractedDependenciesAssets.exists() )
-        {
-            commands.add( "-A" );
-            commands.add( extractedDependenciesAssets.getAbsolutePath() );
-        }
+
         commands.add( "-I" );
         commands.add( getAndroidSdk().getAndroidJar().getAbsolutePath() );
         if ( StringUtils.isNotBlank( configurations ) )
@@ -464,17 +729,18 @@ public class GenerateSourcesMojo extends AbstractAndroidMojo
             commands.add( "-c" );
             commands.add( configurations );
         }
-        if ( proguardFile != null )
+
+        for ( String aaptExtraArg : aaptExtraArgs )
         {
-            File parentFolder = proguardFile.getParentFile();
-            if ( parentFolder != null )
-            {
-                parentFolder.mkdirs();
-            }
-            commands.add( "-G" );
-            commands.add( proguardFile.getAbsolutePath() );
+            commands.add( aaptExtraArg );
         }
-        getLog().info( getAndroidSdk().getAaptPath() + " " + commands.toString() );
+
+        // We need to generate R.txt for all projects as it needs to be consumed when generating R class.
+        // It also needs to be consumed when packaging aar.
+        commands.add( "--output-text-symbols" );
+        commands.add( unpackDir.getAbsolutePath() );
+
+        getLog().debug( getAndroidSdk().getAaptPath() + " " + commands.toString() );
         try
         {
             executor.executeCommand( getAndroidSdk().getAaptPath(), commands, project.getBasedir(), false );
@@ -483,48 +749,8 @@ public class GenerateSourcesMojo extends AbstractAndroidMojo
         {
             throw new MojoExecutionException( "", e );
         }
-
-        project.addCompileSourceRoot( genDirectory.getAbsolutePath() );
     }
 
-    private void addResourcesDirectories( List<String> commands, File[] overlayDirectories )
-    {
-        for ( File resOverlayDir : overlayDirectories )
-        {
-            if ( resOverlayDir != null && resOverlayDir.exists() )
-            {
-                commands.add( "-S" );
-                commands.add( resOverlayDir.getAbsolutePath() );
-            }
-        }
-        if ( combinedRes.exists() )
-        {
-            commands.add( "-S" );
-            commands.add( combinedRes.getAbsolutePath() );
-        }
-        else
-        {
-            if ( resourceDirectory.exists() )
-            {
-                commands.add( "-S" );
-                commands.add( resourceDirectory.getAbsolutePath() );
-            }
-        }
-
-        for ( Artifact artifact : getAllRelevantDependencyArtifacts() )
-        {
-            if ( artifact.getType().equals( APKLIB ) )
-            {
-                String apklibResDirectory = getLibraryUnpackDirectory( artifact ) + "/res";
-                if ( new File( apklibResDirectory ).exists() )
-                {
-                    commands.add( "-S" );
-                    commands.add( apklibResDirectory );
-                }
-            }
-        }        
-    }
-    
     private void mergeManifests() throws MojoExecutionException
     {
         getLog().debug( "mergeManifests: " + mergeManifests );
@@ -537,18 +763,15 @@ public class GenerateSourcesMojo extends AbstractAndroidMojo
 
         getLog().info( "Getting manifests of dependent apklibs" );
         List<File> libManifests = new ArrayList<File>();
-        for ( Artifact artifact : getAllRelevantDependencyArtifacts() )
+        for ( Artifact artifact : getTransitiveDependencyArtifacts( APKLIB, AAR ) )
         {
-            if ( artifact.getType().equals( APKLIB ) )
+            final File libManifest = new File( getUnpackedLibFolder( artifact ), "AndroidManifest.xml" );
+            if ( !libManifest.exists() )
             {
-                File apklibManifeset = new File( getLibraryUnpackDirectory( artifact ), "AndroidManifest.xml" );
-                if ( !apklibManifeset.exists() )
-                {
-                    throw new MojoExecutionException( artifact.getArtifactId() + " is missing AndroidManifest.xml" );
-                }
-
-                libManifests.add( apklibManifeset );
+                throw new MojoExecutionException( artifact.getArtifactId() + " is missing AndroidManifest.xml" );
             }
+
+            libManifests.add( libManifest );
         }
 
         if ( !libManifests.isEmpty() )
@@ -582,94 +805,6 @@ public class GenerateSourcesMojo extends AbstractAndroidMojo
         }
     }
 
-    private void generateApklibR() throws MojoExecutionException
-    {
-        getLog().debug( "Generating R file for projects dependent on apklibs" );
-
-        genDirectory.mkdirs();
-
-        for ( Artifact artifact : getAllRelevantDependencyArtifacts() )
-        {
-            if ( artifact.getType().equals( APKLIB ) )
-            {
-                generateRForApkLibDependency( artifact );
-            }
-        }
-
-        project.addCompileSourceRoot( genDirectory.getAbsolutePath() );
-    }
-
-    private void generateRForApkLibDependency( Artifact apklibArtifact ) throws MojoExecutionException
-    {
-        final String unpackDir = getLibraryUnpackDirectory( apklibArtifact );
-        getLog().debug( "Generating R file for apklibrary: " + apklibArtifact.getGroupId() );
-
-        CommandExecutor executor = CommandExecutor.Factory.createDefaultCommmandExecutor();
-        executor.setLogger( this.getLog() );
-
-        List<String> commands = new ArrayList<String>();
-        commands.add( "package" );
-        commands.add( "--non-constant-id" );
-        commands.add( "-m" );
-        commands.add( "-J" );
-        commands.add( genDirectory.getAbsolutePath() );
-        commands.add( "--custom-package" );
-        commands.add( extractPackageNameFromAndroidManifest( new File( unpackDir + "/" + "AndroidManifest.xml" ) ) );
-        commands.add( "-M" );
-        commands.add( androidManifestFile.getAbsolutePath() );
-        if ( resourceDirectory.exists() )
-        {
-            commands.add( "-S" );
-            commands.add( resourceDirectory.getAbsolutePath() );
-        }
-        for ( Artifact artifact : getAllRelevantDependencyArtifacts() )
-        {
-            if ( artifact.getType().equals( APKLIB ) )
-            {
-                final String apkLibResDir = getLibraryUnpackDirectory( artifact ) + "/res";
-                if ( new File( apkLibResDir ).exists() )
-                {
-                    commands.add( "-S" );
-                    commands.add( apkLibResDir );
-                }
-            }
-        }
-        commands.add( "--auto-add-overlay" );
-        if ( assetsDirectory.exists() )
-        {
-            commands.add( "-A" );
-            commands.add( assetsDirectory.getAbsolutePath() );
-        }
-        for ( Artifact artifact : getAllRelevantDependencyArtifacts() )
-        {
-            if ( artifact.getType().equals( APKLIB ) )
-            {
-                final String apkLibAssetsDir = getLibraryUnpackDirectory( artifact ) + "/assets";
-                if ( new File( apkLibAssetsDir ).exists() )
-                {
-                    commands.add( "-A" );
-                    commands.add( apkLibAssetsDir );
-                }
-            }
-        }
-        commands.add( "-I" );
-        commands.add( getAndroidSdk().getAndroidJar().getAbsolutePath() );
-        if ( StringUtils.isNotBlank( configurations ) )
-        {
-            commands.add( "-c" );
-            commands.add( configurations );
-        }
-        getLog().info( getAndroidSdk().getAaptPath() + " " + commands.toString() );
-        try
-        {
-            executor.executeCommand( getAndroidSdk().getAaptPath(), commands, project.getBasedir(), false );
-        }
-        catch ( ExecutionException e )
-        {
-            throw new MojoExecutionException( "", e );
-        }
-    }
-
     private void generateBuildConfig() throws MojoExecutionException
     {
         getLog().debug( "Generating BuildConfig file" );
@@ -680,34 +815,50 @@ public class GenerateSourcesMojo extends AbstractAndroidMojo
         {
             packageName = customPackage;
         }
-        generateBuildConfigForPackage( packageName, !release );
+        generateBuildConfigForPackage( packageName );
 
-        // Generate the BuildConfig for any apklib dependencies.
-        for ( Artifact artifact : getAllRelevantDependencyArtifacts() )
+        // Generate the BuildConfig for any APKLIB and AAR dependencies.
+        // Need to generate for AAR, because some old AARs like ActionBarSherlock do not have BuildConfig (or R)
+        for ( Artifact artifact : getTransitiveDependencyArtifacts( APKLIB, AAR ) )
         {
-            if ( artifact.getType().equals( "apklib" ) )
-            {
-                File apklibManifeset = new File( getLibraryUnpackDirectory( artifact ), "AndroidManifest.xml" );
-                String apklibPackageName = extractPackageNameFromAndroidManifest( apklibManifeset );
-                generateBuildConfigForPackage( apklibPackageName, !release );
-            }
+            final File manifest = new File( getUnpackedLibFolder( artifact ), "AndroidManifest.xml" );
+            final String depPackageName = extractPackageNameFromAndroidManifest( manifest );
+            generateBuildConfigForPackage( depPackageName );
         }
     }
 
-    private void generateBuildConfigForPackage( String packageName, boolean debug ) throws MojoExecutionException
+    private void generateBuildConfigForPackage( String packageName ) throws MojoExecutionException
     {
         File outputFolder = new File( genDirectory, packageName.replace( ".", File.separator ) );
         outputFolder.mkdirs();
-        String buildConfig = ""
-                + "package " + packageName + ";\n\n"
-                + "public final class BuildConfig {\n"
-                + "  public static final boolean DEBUG = " + Boolean.toString( debug ) + ";\n"
-                + "}\n"
-        ;
+
+        StringBuilder buildConfig = new StringBuilder();
+        buildConfig.append( "package " ).append( packageName ).append( ";\n\n" );
+        buildConfig.append( "public final class BuildConfig {\n" );
+        buildConfig.append( "  public static final boolean DEBUG = " ).append( !release ).append( ";\n" );
+        for ( BuildConfigConstant constant : buildConfigConstants )
+        {
+            String value = constant.getValue();
+            if ( "String".equals( constant.getType() ) )
+            {
+                value = "\"" + value + "\"";
+            }
+
+            buildConfig.append( "  public static final " )
+                       .append( constant.getType() )
+                       .append( " " )
+                       .append( constant.getName() )
+                       .append( " = " )
+                       .append( value )
+                       .append( ";\n" );
+        }
+        buildConfig.append( "}\n" );
+
+
         File outputFile = new File( outputFolder, "BuildConfig.java" );
         try
         {
-            FileUtils.writeStringToFile( outputFile, buildConfig );
+            FileUtils.writeStringToFile( outputFile, buildConfig.toString() );
         }
         catch ( IOException e )
         {
@@ -731,6 +882,7 @@ public class GenerateSourcesMojo extends AbstractAndroidMojo
         protoCommands.add( "-p" + getAndroidSdk().getPathForFrameworkAidl() );
 
         genDirectoryAidl.mkdirs();
+        getLog().warn( "Adding AIDL gen folder to compile classpath: " + genDirectoryAidl );
         project.addCompileSourceRoot( genDirectoryAidl.getPath() );
         Set<File> sourceDirs = files.keySet();
         for ( File sourceDir : sourceDirs )
@@ -770,8 +922,15 @@ public class GenerateSourcesMojo extends AbstractAndroidMojo
 
     private String[] findRelativeAidlFileNames( File sourceDirectory )
     {
-        String[] relativeAidlFileNames = findFilesInDirectory( sourceDirectory, "**/*.aidl" );
-        getLog().info( "ANDROID-904-002: Found aidl files: Count = " + relativeAidlFileNames.length );
+        final String[] relativeAidlFileNames = findFilesInDirectory( sourceDirectory, "**/*.aidl" );
+        if ( relativeAidlFileNames.length == 0 )
+        {
+            getLog().debug( "ANDROID-904-002: Found aidl files: Count = " + relativeAidlFileNames.length );
+        }
+        else
+        {
+            getLog().info( "ANDROID-904-002: Found aidl files: Count = " + relativeAidlFileNames.length );
+        }
         return relativeAidlFileNames;
     }
 
@@ -783,7 +942,7 @@ public class GenerateSourcesMojo extends AbstractAndroidMojo
         Set<String> androidArtifacts = new HashSet<String>()
         {
             {
-                addAll( Arrays.asList( APK, APKLIB, APKSOURCES ) );
+                addAll( Arrays.asList( APK, APKLIB, APKSOURCES, AAR ) );
             }
         };
         return androidArtifacts.contains( project.getArtifact().getType() );

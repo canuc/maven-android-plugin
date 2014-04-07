@@ -24,7 +24,7 @@ extends AbstractAndroidMojoTestCase<ApkMojo>
 	{
 		final List<Object[]> suite = new ArrayList<Object[]>();
 
-		suite.add( new Object[] { "apk-config-project1", new String[0] } );
+		suite.add( new Object[] { "apk-config-project1", null } );
 		suite.add( new Object[] { "apk-config-project2", new String[] { "persistence.xml" } } );
 		suite.add( new Object[] { "apk-config-project3", new String[] { "services/**", "persistence.xml" } } );
 
@@ -69,13 +69,12 @@ extends AbstractAndroidMojoTestCase<ApkMojo>
 	{
 		final ApkMojo mojo = createMojo( this.projectName );
 
-		final ConfigHandler cfh = new ConfigHandler( mojo );
+        final ConfigHandler cfh = new ConfigHandler( mojo, this.session, this.execution );
 
 		cfh.parseConfiguration();
 
 		final String[] includes = getFieldValue( mojo, "apkMetaIncludes" );
 
-		Assert.assertNotNull( includes );
 		Assert.assertArrayEquals( this.expected, includes );
 	}
 
